@@ -1,0 +1,202 @@
+[
+  {
+    "name": "pmed01",
+    "orlib": "dataset/OR-Lib/pmed1.txt",
+    "seed_radius": 127
+  },
+  {
+    "name": "pmed02",
+    "orlib": "dataset/OR-Lib/pmed2.txt",
+    "seed_radius": 98
+  },
+  {
+    "name": "pmed03",
+    "orlib": "dataset/OR-Lib/pmed3.txt",
+    "seed_radius": 93
+  },
+  {
+    "name": "pmed04",
+    "orlib": "dataset/OR-Lib/pmed4.txt",
+    "seed_radius": 74
+  },
+  {
+    "name": "pmed05",
+    "orlib": "dataset/OR-Lib/pmed5.txt",
+    "seed_radius": 48
+  },
+  {
+    "name": "pmed06",
+    "orlib": "dataset/OR-Lib/pmed6.txt",
+    "seed_radius": 84
+  },
+  {
+    "name": "pmed07",
+    "orlib": "dataset/OR-Lib/pmed7.txt",
+    "seed_radius": 64
+  },
+  {
+    "name": "pmed08",
+    "orlib": "dataset/OR-Lib/pmed8.txt",
+    "seed_radius": 55
+  },
+  {
+    "name": "pmed09",
+    "orlib": "dataset/OR-Lib/pmed9.txt",
+    "seed_radius": 37
+  },
+  {
+    "name": "pmed10",
+    "orlib": "dataset/OR-Lib/pmed10.txt",
+    "seed_radius": 20
+  },
+  {
+    "name": "pmed11",
+    "orlib": "dataset/OR-Lib/pmed11.txt",
+    "seed_radius": 59
+  },
+  {
+    "name": "pmed12",
+    "orlib": "dataset/OR-Lib/pmed12.txt",
+    "seed_radius": 51
+  },
+  {
+    "name": "pmed13",
+    "orlib": "dataset/OR-Lib/pmed13.txt",
+    "seed_radius": 36
+  },
+  {
+    "name": "pmed14",
+    "orlib": "dataset/OR-Lib/pmed14.txt",
+    "seed_radius": 26
+  },
+  {
+    "name": "pmed15",
+    "orlib": "dataset/OR-Lib/pmed15.txt",
+    "seed_radius": 18
+  },
+  {
+    "name": "pmed16",
+    "orlib": "dataset/OR-Lib/pmed16.txt",
+    "seed_radius": 47
+  },
+  {
+    "name": "pmed17",
+    "orlib": "dataset/OR-Lib/pmed17.txt",
+    "seed_radius": 39
+  },
+  {
+    "name": "pmed18",
+    "orlib": "dataset/OR-Lib/pmed18.txt",
+    "seed_radius": 28
+  },
+  {
+    "name": "pmed19",
+    "orlib": "dataset/OR-Lib/pmed19.txt",
+    "seed_radius": 18
+  },
+  {
+    "name": "pmed20",
+    "orlib": "dataset/OR-Lib/pmed20.txt",
+    "seed_radius": 13
+  },
+  {
+    "name": "pmed21",
+    "orlib": "dataset/OR-Lib/pmed21.txt",
+    "seed_radius": 40
+  },
+  {
+    "name": "pmed22",
+    "orlib": "dataset/OR-Lib/pmed22.txt",
+    "seed_radius": 38
+  },
+  {
+    "name": "pmed23",
+    "orlib": "dataset/OR-Lib/pmed23.txt",
+    "seed_radius": 22
+  },
+  {
+    "name": "pmed24",
+    "orlib": "dataset/OR-Lib/pmed24.txt",
+    "seed_radius": 15
+  },
+  {
+    "name": "pmed25",
+    "orlib": "dataset/OR-Lib/pmed25.txt",
+    "seed_radius": 11
+  },
+  {
+    "name": "pmed26",
+    "orlib": "dataset/OR-Lib/pmed26.txt",
+    "seed_radius": 38
+  },
+  {
+    "name": "pmed27",
+    "orlib": "dataset/OR-Lib/pmed27.txt",
+    "seed_radius": 32
+  },
+  {
+    "name": "pmed28",
+    "orlib": "dataset/OR-Lib/pmed28.txt",
+    "seed_radius": 18
+  },
+  {
+    "name": "pmed29",
+    "orlib": "dataset/OR-Lib/pmed29.txt",
+    "seed_radius": 13
+  },
+  {
+    "name": "pmed30",
+    "orlib": "dataset/OR-Lib/pmed30.txt",
+    "seed_radius": 9
+  },
+  {
+    "name": "pmed31",
+    "orlib": "dataset/OR-Lib/pmed31.txt",
+    "seed_radius": 30
+  },
+  {
+    "name": "pmed32",
+    "orlib": "dataset/OR-Lib/pmed32.txt",
+    "seed_radius": 29
+  },
+  {
+    "name": "pmed33",
+    "orlib": "dataset/OR-Lib/pmed33.txt",
+    "seed_radius": 15
+  },
+  {
+    "name": "pmed34",
+    "orlib": "dataset/OR-Lib/pmed34.txt",
+    "seed_radius": 11
+  },
+  {
+    "name": "pmed35",
+    "orlib": "dataset/OR-Lib/pmed35.txt",
+    "seed_radius": 30
+  },
+  {
+    "name": "pmed36",
+    "orlib": "dataset/OR-Lib/pmed36.txt",
+    "seed_radius": 27
+  },
+  {
+    "name": "pmed37",
+    "orlib": "dataset/OR-Lib/pmed37.txt",
+    "seed_radius": 15
+  },
+  {
+    "name": "pmed38",
+    "orlib": "dataset/OR-Lib/pmed38.txt",
+    "seed_radius": 29
+  },
+  {
+    "name": "pmed39",
+    "orlib": "dataset/OR-Lib/pmed39.txt",
+    "seed_radius": 23
+  },
+  {
+    "name": "pmed40",
+    "orlib": "dataset/OR-Lib/pmed40.txt",
+    "seed_radius": 13
+  }
+]
