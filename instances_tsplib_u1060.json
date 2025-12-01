@@ -1,0 +1,92 @@
+[
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 10,
+    "seed_radius": 2273.0838023486945
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 20,
+    "seed_radius": 1580.795158203617
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 30,
+    "seed_radius": 1207.7734725518685
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 40,
+    "seed_radius": 1020.5609533976893
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 50,
+    "seed_radius": 904.9234259869723
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 60,
+    "seed_radius": 781.1698617458305
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 70,
+    "seed_radius": 710.7469705176359
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 80,
+    "seed_radius": 652.1627490128517
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 90,
+    "seed_radius": 607.8652739711323
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 100,
+    "seed_radius": 570.0089201056421
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 110,
+    "seed_radius": 538.8359486893925
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 120,
+    "seed_radius": 510.27067033095227
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 130,
+    "seed_radius": 499.64999999999964
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 140,
+    "seed_radius": 452.4622773226507
+  },
+  {
+    "name": "u1060",
+    "tsplib": "dataset/TSPLIB/u1060.tsp",
+    "p": 150,
+    "seed_radius": 447.00792878874023
+  }
+]

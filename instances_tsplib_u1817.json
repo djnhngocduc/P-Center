@@ -1,0 +1,92 @@
+[
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 10,
+    "seed_radius": 457.91
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp", 
+    "p": 20,
+    "seed_radius": 309.01420048276094
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 30,
+    "seed_radius": 240.98769366919947
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 40,
+    "seed_radius": 209.44891596759317
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 50,
+    "seed_radius": 184.91
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 60,
+    "seed_radius": 162.64
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 70,
+    "seed_radius": 148.11
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 80,
+    "seed_radius": 136.77
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 90,
+    "seed_radius": 129.51
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 100,
+    "seed_radius": 126.99
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 110,
+    "seed_radius": 109.25
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 120,
+    "seed_radius": 107.76
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 130,
+    "seed_radius": 104.73
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 140,
+    "seed_radius": 101.60
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 150,
+    "seed_radius": 91.60
+  }
+]

@@ -11,6 +11,7 @@ import multiprocessing as mp
 from collections import defaultdict
 import statistics as _stats
 import csv
+import bisect
 
 _CANCEL_SHARED = None 
 INF = 10**12
@@ -37,7 +38,9 @@ def load_instance(inst_desc):
         inst.radii = sorted(set(inst.radii), reverse=True)
     
         sr = float(inst_desc["seed_radius"])
-        seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr + 1e-12), None)
+
+        seed_idx = next((i for i, r in enumerate(inst.radii) if r < sr + 0.005), None)
+
         if seed_idx is None:
             seed_idx = len(inst.radii) - 1
 
@@ -62,6 +65,7 @@ def load_instance(inst_desc):
 
         sr = int(inst_desc["seed_radius"])
         seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
+
         if seed_idx is None:
             seed_idx = len(inst.radii) - 1
 
@@ -503,7 +507,7 @@ def run_experiment(inst_desc, encodings, solvers, time_limit, radii_workers, str
 
     for encoding in encodings:
         for solver_name in solvers:
-            for run_id in range(5):  # 5 lần/cấu hình
+            for run_id in range(1):  # 5 lần/cấu hình
                 print(
                     f"[RUN] instance={inst_desc['name']} run_id={run_id+1} "
                     f"encoding={encoding} solver={solver_name}",
@@ -602,11 +606,23 @@ def write_paper_table(all_results, out_csv_path: str):
 
     # Gom per-run theo cấu hình
     cfg_runs = defaultdict(list)  # (inst,n,p,enc,sol) -> [rows]
+    all_instances = set()
+    methods_seen = set()
+
     for r in all_results:
+        inst = r["instance"]
+        n = r["n"]
+        p = r["p"]
+        enc = r["encoding"]
+        sol = r["solver"]
+
+        all_instances.add((inst, n, p))
+        methods_seen.add((enc, sol))
+
         br = r.get("best_radius")
         if br is None:
             continue
-        key = (r["instance"], r["n"], r["p"], r["encoding"], r["solver"])
+        key = (inst, n, p, enc, sol)
         cfg_runs[key].append(r)
 
     # Với từng cấu hình: bestR_cfg = min(best_radius)
@@ -616,16 +632,9 @@ def write_paper_table(all_results, out_csv_path: str):
         if brs:
             cfg_bestR[key] = min(brs)
 
-    # Lấy tập tất cả method đã xuất hiện
-    methods_seen = set()
     # global_bestR[(inst,n,p)] = bán kính nhỏ nhất giữa mọi method
     global_bestR = {}
-    # inst_methods[(inst,n,p)] = tập method (enc,sol) có ít nhất 1 run
-    inst_methods = defaultdict(set)
-
     for (inst, n, p, enc, sol), R in cfg_bestR.items():
-        inst_methods[(inst, n, p)].add((enc, sol))
-        methods_seen.add((enc, sol))
         if (inst, n, p) not in global_bestR or R < global_bestR[(inst, n, p)]:
             global_bestR[(inst, n, p)] = R
 
@@ -662,13 +671,13 @@ def write_paper_table(all_results, out_csv_path: str):
     solved_by = {method_label(solver=sol, enc=enc): [] for (enc, sol) in method_cols}
 
     # Với mỗi instance (inst,n,p) -> đúng 1 dòng
-    for (inst, n, p) in sorted(inst_methods.keys(), key=lambda x: (str(x[0]), x[1], x[2])):
-        gR = global_bestR[(inst, n, p)]
+    for (inst, n, p) in sorted(all_instances, key=lambda x: (str(x[0]), x[1], x[2])):
+        gR = global_bestR.get((inst, n, p))
         row = {
             "Instance": inst,
             "n": n,
             "p": p,
-            "radius": gR
+            "radius": gR if gR is not None else "-"
         }
 
         for (enc, sol) in method_cols:

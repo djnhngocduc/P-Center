@@ -1,0 +1,2 @@
+The SAT solver Sparrow is licensed under the GPL v3 license.
+The SAT solver Riss is licensed under the LGPL v2 license.

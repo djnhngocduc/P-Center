@@ -1,24 +1,27 @@
 import argparse
 import json
-import time
+import time, threading
 import heapq
 import os, sys
-import csv
-import multiprocessing as mp
-import statistics as _stats
-import threading
+from typing import List, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pysat.solvers import Solver
 from encoder import PCenterSAT
+import multiprocessing as mp
 from collections import defaultdict
-from typing import List, Tuple
+import statistics as _stats
+import csv
+import bisect
 
 _CANCEL_SHARED = None 
 INF = 10**12
 
 def _pool_initializer(cancel_proxy):
+    # Mỗi worker nhận proxy dict để đọc Event theo idx
     global _CANCEL_SHARED
     _CANCEL_SHARED = cancel_proxy
 
+    # In PID worker 1 lần để kiểm chứng ~8 PID cố định
     print(f"[POOL] worker PID={os.getpid()}", file=sys.stderr, flush=True)
 
 # ---------------- IO helpers ----------------
@@ -35,7 +38,11 @@ def load_instance(inst_desc):
         inst.radii = sorted(set(inst.radii), reverse=True)
     
         sr = float(inst_desc["seed_radius"])
-        seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr + 1e-12), None)
+
+        seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
+
+        if seed_idx is None:
+            seed_idx = len(inst.radii) - 1
 
     elif "orlib" in inst_desc:
         t0 = time.time()
@@ -58,6 +65,20 @@ def load_instance(inst_desc):
 
         sr = int(inst_desc["seed_radius"])
         seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
+
+        if seed_idx is None:
+            seed_idx = len(inst.radii) - 1
+
+    if inst.radii:
+        seed_R = inst.radii[seed_idx]
+        print(
+            f"[SEED] {inst_desc['name']}: "
+            f"seed_idx={seed_idx}, seed_radius={seed_R}, "
+            f"radii_len={len(inst.radii)}, p={inst.p}, n={inst.n}",
+            flush=True
+        )
+    else:
+        print(f"[SEED] {inst_desc['name']}: radii empty?!", flush=True)
 
     return inst, seed_idx
 
@@ -101,14 +122,14 @@ def load_orlib_edge_list(path: str):
             parts = line.strip().split()
             if len(parts) < 3:
                 continue
-            u, v, w = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2]) 
+            u, v, w = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2])  # Giảm chỉ số từ 1 xuống 0
 
             edges.append((u, v, w))
 
     return n, p, edges
 
 
-def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]):
+def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]) -> List[List[int]]:
     c = [[INF] * n for _ in range(n)]
     for i in range(n):
         c[i][i] = 0
@@ -118,11 +139,9 @@ def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]):
         if u == v:
             c[u][v] = 0
         else:
-            # dòng sau cùng sẽ ghi đè (chuẩn OR-Lib)
             c[u][v] = ww
             c[v][u] = ww
 
-    # 2) Chuyển sang adjacency (bỏ INF)
     adj = [[] for _ in range(n)]
     for u in range(n):
         row = c[u]
@@ -131,7 +150,6 @@ def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]):
             if u != v and w < INF:
                 adj[u].append((v, w))
 
-    # 3) APSP bằng Dijkstra-from-each-source
     D = [[INF] * n for _ in range(n)]
     for s in range(n):
         dist = [INF] * n
@@ -150,37 +168,16 @@ def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]):
 
     return D
 
-def _apply_async_wrapper(args):
-    # tiện để Pool.apply_async nhận 1 tuple args
-    return _solve_radius_worker_proc(*args)
-
-def _iter_async_results(async_map):
-    """Yield kết quả theo dạng 'as_completed' cho multiprocessing.Pool.apply_async."""
-    pending = dict(async_map)  # {AsyncResult: k}
-    while pending:
-        done = []
-        for h, k in list(pending.items()):
-            if h.ready():
-                try:
-                    res = h.get()
-                except Exception:
-                    res = (k, None, "timeout", 0.0, None, None, None)
-                yield res
-                done.append(h)
-        for h in done:
-            pending.pop(h, None)
-        if pending:
-            time.sleep(0.01)
-
 def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii_workers=8, seed_idx=None, mgr=None, cancel_dict=None):
+    """
+    Dùng pool cố định (ProcessPoolExecutor) với max_workers = radii_workers.
+    Ngắt mềm job bán kính lớn hơn bằng Event + solver.interrupt().
+    """
     radii = inst.radii
     nR = len(radii)
     start_wall = time.time()
     if nR == 0:
         return "infeasible", None, 0.0, None, None, None, None
-
-    dist_raw = inst.dist
-    p_raw = inst.p
 
     decided = {}
     best_nvars = None
@@ -193,30 +190,37 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
     covered = set()
     best_sat_idx = None
 
+    print(
+        f"[SEARCH-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
+        f"seed_idx={i} seed_R={radii[i]} nR={nR} workers={radii_workers}",
+        flush=True
+    )
+
     # helper: tạo Event cho một idx nếu chưa có
     def ensure_event(idx):
         if cancel_dict is not None:
             if idx not in cancel_dict:
-                cancel_dict[idx] = mgr.Event()
+                cancel_dict[idx] = mgr.Event()  # Event proxy
             return cancel_dict[idx]
         return None
 
     # submit batch lên pool
-    def launch_batch(pool, idxs):
-        asyncs = {}
+    def launch_batch(ex, idxs):
+        futs = {}
+        print(
+            f"[BATCH-SUBMIT] idxs={idxs} radii={[radii[k] for k in idxs]}",
+            flush=True
+        )
         for k in idxs:
             ensure_event(k)
             R = radii[k]
-            a = (k, dist_raw, p_raw, encoding, solver_name, R, time_limit)
-            h = pool.apply_async(_apply_async_wrapper, (a,))
-            asyncs[h] = k
-        return asyncs
+            print(f"[TASK-SUBMIT] idx={k} R={R}", flush=True)
 
-    with mp.get_context("spawn").Pool(
-        processes=radii_workers,
-        initializer=_pool_initializer,
-        initargs=(cancel_dict,)
-    ) as pool:
+            fut = ex.submit(_solve_radius_worker_proc, k, inst, encoding, solver_name, R, time_limit)
+            futs[fut] = k
+        return futs
+
+    with ProcessPoolExecutor(max_workers=radii_workers, initializer=_pool_initializer, initargs=(cancel_dict,)) as ex:
         while i < nR:
             j = min(nR - 1, i + radii_workers - 1)
             need = [k for k in range(i, j + 1) if k not in covered]
@@ -224,12 +228,22 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                 i = j + 1
                 continue
 
-            asyncs = launch_batch(pool, need)
+            futs = launch_batch(ex, need)
             best_sat_in_batch = None
 
-            for idx, R, status, t_sec, nvars, nclauses, centers in _iter_async_results(asyncs):
-                if R is None:
-                    R = radii[idx]
+            for fut in as_completed(futs):
+                k = futs[fut]
+                try:
+                    idx, R, status, t_sec, nvars, nclauses, centers = fut.result()
+                except Exception:
+                    idx, R = k, radii[k]
+                    status, t_sec, nvars, nclauses, centers = "timeout", 0.0, None, None, None
+                print(
+                    f"[TASK-DONE] idx={idx} R={R} status={status} "
+                    f"t_cpu={(t_sec if t_sec is not None else 0.0):.6f}s",
+                    flush=True
+                )
+
                 decided[idx] = status
 
                 if nvars is not None and nclauses is not None:
@@ -241,35 +255,55 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                     sat_cpu_time[idx] = t_sec
                     if (best_sat_in_batch is None) or (idx > best_sat_in_batch):
                         best_sat_in_batch = idx
+                    # NGẮT MỀM mọi job có idx < idx_sat (bán kính lớn hơn)
                     if cancel_dict is not None:
                         for kk in need:
                             if kk < best_sat_in_batch:
                                 try:
                                     cancel_dict[kk].set()
+                                    print(f"[CANCEL] cancel idx={kk} " f"(dominated by SAT at idx={best_sat_in_batch})", flush=True)
                                 except Exception:
                                     pass
 
             covered.update(need)
 
+            # Co dần nếu có SAT trong batch
             if best_sat_in_batch is not None:
                 k = best_sat_in_batch
+                print(
+                    f"[REFINE] start_from_idx={k} R={radii[k]}",
+                    flush=True
+                )
                 while k + 1 < nR:
                     nxt = k + 1
                     if nxt in decided:
+                        print(
+                            f"[REFINE] nxt={nxt} already decided={decided[nxt]}",
+                            flush=True
+                        )
                         if decided[nxt] == "unsat":
                             best_sat_idx = k
                             break
                         elif decided[nxt] == "sat":
                             k = nxt
                             continue
+                        else:
+                            break
 
+                    # chạy đơn lẻ bán kính tiếp theo
                     ensure_event(nxt)
-                    asyncs2 = launch_batch(pool, [nxt])
-                    h2 = next(iter(asyncs2.keys()))
+                    futs2 = launch_batch(ex, [nxt])
+                    # không cần as_completed loop phức tạp vì chỉ 1 future
+                    fut2 = next(iter(futs2.keys()))
                     try:
-                        idx2, R2, status2, t2, nv2, nc2, centers2 = h2.get()
+                        idx2, R2, status2, t2, nv2, nc2, centers2 = fut2.result()
                     except Exception:
                         status2, t2, nv2, nc2, centers2 = "timeout", 0.0, None, None, None
+                    
+                    print(
+                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2} t_cpu={t2}",
+                        flush=True
+                    )
 
                     decided[nxt] = status2
                     if nv2 is not None and nc2 is not None:
@@ -282,14 +316,23 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                     elif status2 == "sat":
                         sat_solutions[nxt] = centers2
                         sat_cpu_time[nxt] = t2
+                        # NGẮT MỀM mọi job có idx < nxt
                         if cancel_dict is not None:
                             for kk in range(0, nxt):
                                 if kk in cancel_dict:
-                                    try: cancel_dict[kk].set()
-                                    except Exception: pass
+                                    try: 
+                                        cancel_dict[kk].set()
+                                        print(
+                                            f"[CANCEL] cancel idx={kk} "
+                                            f"(dominated by deeper SAT at idx={nxt})",
+                                            flush=True
+                                        )
+                                    except Exception: 
+                                        pass
                         k = nxt
                         continue
                     else:
+                        # timeout -> dừng co để tránh vòng vô hạn
                         break
 
                 if best_sat_idx is not None:
@@ -302,27 +345,58 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
     if best_sat_idx is None:
         if sat_solutions:
             best_sat_idx = max(sat_solutions.keys())
+            print(
+                f"[FALLBACK] no UNSAT boundary proved; "
+                f"choose best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                flush=True
+            )
         else:
+            print(
+                "[RESULT] infeasible (no SAT found at any radius)",
+                flush=True
+            )
             return "infeasible", None, elapsed, best_nvars, best_nclauses, None, None
 
     best_centers = sat_solutions.get(best_sat_idx, None)
     best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
+
+    print(
+        f"[RESULT] status=OK best_idx={best_sat_idx} best_R={radii[best_sat_idx]} "
+        f"elapsed_wall={elapsed:.6f}s cpu_at_best={best_sat_cpu}",
+        flush=True
+    )
+
     return "OK", radii[best_sat_idx], elapsed, best_nvars, best_nclauses, best_centers, best_sat_cpu
 
-
-
-def _solve_radius_worker_proc(idx, dist, p, encoding, solver_name, radius, time_limit):
+def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_limit):
     """
-    Chạy trong process riêng. Trả về:
-    (idx, radius, status, solver_time, nvars, nclauses, centers)
+    Chạy trong process pool (executor). Trả về:
+    (idx, radius, status, elapsed, nvars, nclauses, centers)
     """
+    pid = os.getpid()
+    print(
+        f"[WORKER-START] pid={pid} idx={idx} R={radius} "
+        f"enc={encoding} solver={solver_name} limit={time_limit}s",
+        flush=True
+    )
+
     try:
-        inst = PCenterSAT.from_distance_matrix(dist, p)
         cnf, varmap = inst._encode_cnf(radius, encoding)
+
+        print(f"[ENCODE] idx={idx} R={radius} |Nc|={len(varmap.get('Nc',[]))} |Nd|={len(varmap.get('Nd',[]))} "
+      f"candidates={len(varmap.get('candidates',[]))} bound={varmap.get('bound')} "
+      f"clauses={0 if cnf is None else len(cnf.clauses)} vars={0 if cnf is None else cnf.nv}",
+      flush=True)
         if cnf is None:
+            print(
+                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                f"-> UNSAT(by reduction)",
+                flush=True
+            )
             return (idx, radius, "unsat", 0.0, None, None, None)
 
         with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
+            # --- watcher: ngắt mềm nếu parent set Event cho idx này ---
             cancel_ev = None
             try:
                 if _CANCEL_SHARED is not None:
@@ -340,32 +414,48 @@ def _solve_radius_worker_proc(idx, dist, p, encoding, solver_name, radius, time_
                         pass
                 watcher = threading.Thread(target=_watch, daemon=True)
                 watcher.start()
+            # ------------------------------------------------------------
 
             timer = None
-            try: 
+            try:
                 if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
-                    t0 = time.process_time_ns()
+                    t0 = time.perf_counter()
                     sat = solver.solve_limited(expect_interrupt=True)
-                    t1 = time.process_time_ns()
+                    t1 = time.perf_counter()
                 else:
-                    t0 = time.process_time_ns()
+                    t0 = time.perf_counter()
                     sat = solver.solve()
-                    t1 = time.process_time_ns()
+                    t1 = time.perf_counter()
 
-                solver_time = (t1 - t0) / 1e9
+                solver_time = t1 - t0
 
                 nvars = cnf.nv
                 nclauses = len(cnf.clauses)
 
                 if sat is None:
-                    return (idx, radius, "timeout", None, nvars, nclauses, None)
+                    print(
+                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                        f"-> TIMEOUT cpu={solver_time:.6f}s",
+                        flush=True
+                    )
+                    return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
                 if not sat:
+                    print(
+                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                        f"-> UNSAT cpu={solver_time:.6f}s",
+                        flush=True
+                    )
                     return (idx, radius, "unsat", solver_time, nvars, nclauses, None)
 
                 model = solver.get_model() or []
                 if not model:
+                    print(
+                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                        f"-> TIMEOUT(no model) cpu={solver_time:.6f}s",
+                        flush=True
+                    )
                     return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
 
                 model_set = set(model)
@@ -374,13 +464,21 @@ def _solve_radius_worker_proc(idx, dist, p, encoding, solver_name, radius, time_
                 candidates = set(varmap.get("candidates", []))
                 chosen = {j for j, v in enumerate(y_vars) if (v in model_set) and (j in candidates)}
                 centers = sorted(chosen | Nc)
+                print(
+                    f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                    f"-> SAT cpu={solver_time:.6f}s centers={centers}",
+                    flush=True
+                )
                 return (idx, radius, "sat", solver_time, nvars, nclauses, centers)
             finally:
                 if timer:
                     timer.cancel()
-    except Exception:
+    except Exception as e:
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> EXCEPTION {e}",
+            flush=True
+        )
         return (idx, radius, "timeout", 0.0, None, None, None)
-
 
 
 
@@ -389,10 +487,10 @@ def _solve_radius_worker_proc(idx, dist, p, encoding, solver_name, radius, time_
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", type=str, required=True, help="Path to instances.json")
-    ap.add_argument("--encodings", nargs="+", default=["seq"], help="Encodings to test: seq par")
+    ap.add_argument("--encodings", nargs="+", default=["pysat_sc", "pypb_sc", "nsc", "pb_bdd"], help="Encodings to test: pysat_sc pypb_sc nsc pb_bdd")
     ap.add_argument("--solvers", nargs="+", default=["maplecm", "maplechrono", "riss"], help="SAT solvers to use")
     ap.add_argument("--time-limit", type=int, default=14400, help="Time limit per radius solve (seconds)")
-    ap.add_argument("--radii-workers", type=int, default=8, help="Parallel radii workers (paper uses 8)")
+    ap.add_argument("--radii-workers", type=int, default=8, help="Parallel radii workers")
     ap.add_argument("--out", type=str, default="results.csv", help="CSV output path")
     ap.add_argument("--strategy", type=str, choices=["parallel"], default="parallel",
     help="Radius search strategy (paper compares parallel only)")
@@ -401,16 +499,34 @@ def parse_args():
 def run_experiment(inst_desc, encodings, solvers, time_limit, radii_workers, strategy, *, mgr, cancel_dict):
     results = []
     inst, seed_idx = load_instance(inst_desc)
+    print(
+        f"[RUN-EXPERIMENT] {inst_desc['name']} "
+        f"seed_idx={seed_idx} seed_radius={inst.radii[seed_idx]} "
+        f"p={inst.p} n={inst.n}",
+        flush=True
+    )
 
     for encoding in encodings:
         for solver_name in solvers:
-            for run_id in range(5):
+            for run_id in range(1):  # 5 lần/cấu hình
+                print(
+                    f"[RUN] instance={inst_desc['name']} run_id={run_id+1} "
+                    f"encoding={encoding} solver={solver_name}",
+                    flush=True
+                )
                 status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu = search_min_radius_parallel(
                     inst, encoding, solver_name, time_limit,
                     radii_workers=radii_workers,
                     seed_idx=seed_idx,
                     mgr=mgr,
                     cancel_dict=cancel_dict
+                )
+
+                print(
+                    f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id+1} "
+                    f"status={status} best_radius={best_radius} "
+                    f"elapsed_wall={elapsed_time:.6f}s cpu_time_at_bestR={best_sat_cpu}",
+                    flush=True
                 )
 
                 results.append({
@@ -436,9 +552,14 @@ def run_experiment(inst_desc, encodings, solvers, time_limit, radii_workers, str
 def print_instance_summary_for_console(all_results_for_inst):
     # Gom theo cấu hình
     cfg_runs = defaultdict(list)  # (enc,sol) -> [rows]
-    inst_name = None; n = None; p = None
+    inst_name = None
+    n = None
+    p = None
+
     for r in all_results_for_inst:
-        inst_name = r["instance"]; n = r["n"]; p = r["p"]
+        inst_name = r["instance"]
+        n = r["n"]
+        p = r["p"]
         cfg_runs[(r["encoding"], r["solver"])].append(r)
 
     # bestR của từng method
@@ -455,22 +576,23 @@ def print_instance_summary_for_console(all_results_for_inst):
     # global best radius trên instance
     gR = min(cfg_bestR.values())
 
-    # Tính mean CPU time tại đúng gR cho từng method
-    # method_cols theo thứ tự đẹp
-    canonical = [("seq","maplecm"), ("seq","maplechrono"), ("seq","riss"),
-                 ("par","maplecm"), ("par","maplechrono"), ("par","riss")]
-    methods_seen = list(cfg_runs.keys())
-    method_cols = [m for m in canonical if m in methods_seen] + [m for m in methods_seen if m not in canonical]
+    # chúng ta muốn in theo thứ tự ổn định:
+    # ưu tiên solver MapleCM -> MapleChrono -> Riss
+    # trong từng solver thì sort encoding alphabetically
+    def sort_key(enc_sol):
+        enc, sol = enc_sol
+        solver_rank = {"maplecm": 0, "maplechrono": 1, "riss": 2}
+        return (solver_rank.get(sol, 99), sol, enc)
 
-    def mlabel(enc, sol):
-        sm = {"maplecm":"Maple","maplechrono":"MapleChrono","riss":"Riss"}.get(sol, sol)
-        em = {"seq":"SEQ","par":"PAR"}.get(enc, enc).upper()
-        return f"{sm} {em}"
+    method_cols = sorted(cfg_runs.keys(), key=sort_key)
 
     # In 1 dòng/ method giống format cũ nhưng thay cpu_mean thành mean CPU@R*
     for (enc, sol) in method_cols:
         runs = cfg_runs[(enc, sol)]
-        ts = [x.get("cpu_time_at_bestR") for x in runs if x.get("status") == "OK" and x.get("best_radius") == gR and x.get("cpu_time_at_bestR") is not None]
+
+        ts = [x.get("cpu_time_at_bestR") for x in runs
+              if x.get("status") == "OK" and x.get("best_radius") == gR and x.get("cpu_time_at_bestR") is not None]
+
         if ts:
             mean_cpu = _stats.mean(ts)
             print(f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
@@ -480,34 +602,40 @@ def print_instance_summary_for_console(all_results_for_inst):
                   f"radius={gR} cpu_mean=- ")
 
 def write_paper_table(all_results, out_csv_path: str):
-
     def method_label(solver: str, enc: str) -> str:
-        solver_map = {
-            "maplecm": "Maple",
-            "maplechrono": "MapleChrono",
-            "riss": "Riss",
-        }
-        enc_map = {"seq": "SEQ", "par": "PAR"}
-        return f"{solver_map.get(solver, solver)} {enc_map.get(enc, enc).upper()}"
+        return f"{solver} {enc}"
 
     # Gom per-run theo cấu hình
     cfg_runs = defaultdict(list)  # (inst,n,p,enc,sol) -> [rows]
+    all_instances = set()
+    methods_seen = set()
+
     for r in all_results:
+        inst = r["instance"]
+        n = r["n"]
+        p = r["p"]
+        enc = r["encoding"]
+        sol = r["solver"]
+
+        all_instances.add((inst, n, p))
+        methods_seen.add((enc, sol))
+
         br = r.get("best_radius")
         if br is None:
             continue
-        key = (r["instance"], r["n"], r["p"], r["encoding"], r["solver"])
+        key = (inst, n, p, enc, sol)
         cfg_runs[key].append(r)
 
     # Với từng cấu hình: bestR_cfg = min(best_radius)
     cfg_bestR = {}  # (inst,n,p,enc,sol) -> bestR_cfg
     for key, runs in cfg_runs.items():
-        cfg_bestR[key] = min(x["best_radius"] for x in runs if x.get("best_radius") is not None)
+        brs = [x["best_radius"] for x in runs if x.get("best_radius") is not None]
+        if brs:
+            cfg_bestR[key] = min(brs)
 
-    inst_methods = defaultdict(set)  # (inst,n,p) -> {(enc,sol)}
+    # global_bestR[(inst,n,p)] = bán kính nhỏ nhất giữa mọi method
     global_bestR = {}
     for (inst, n, p, enc, sol), R in cfg_bestR.items():
-        inst_methods[(inst, n, p)].add((enc, sol))
         if (inst, n, p) not in global_bestR or R < global_bestR[(inst, n, p)]:
             global_bestR[(inst, n, p)] = R
 
@@ -515,54 +643,70 @@ def write_paper_table(all_results, out_csv_path: str):
     # key: (inst,n,p,enc,sol) -> list times khi run đạt global_bestR
     times_at_global = defaultdict(list)
     for (inst, n, p, enc, sol), runs in cfg_runs.items():
-        gR = global_bestR[(inst, n, p)]
+        gR = global_bestR.get((inst, n, p))
+        if gR is None:
+            continue
         for x in runs:
-            if x.get("status") == "OK" and x.get("best_radius") == gR:
-                t = x.get("cpu_time_at_bestR")
-                if t is not None:
-                    times_at_global[(inst, n, p, enc, sol)].append(t)
+            # ta chỉ collect time nếu run đạt gR của instance
+            if (
+                x.get("status") == "OK"
+                and x.get("best_radius") == gR
+                and x.get("cpu_time_at_bestR") is not None
+            ):
+                times_at_global[(inst, n, p, enc, sol)].append(x["cpu_time_at_bestR"])
 
-    # Xác định danh sách cột method theo thứ tự “đẹp”
-    # Nếu bạn chỉ chạy maplecm+seq thì bảng sẽ chỉ có 1 cột "Maple SEQ".
-    methods_seen = set((enc, sol) for (_, _, _, enc, sol) in cfg_runs.keys())
-    canonical = [("seq", "maplecm"), ("seq", "maplechrono"), ("seq", "riss"),
-                 ("par", "maplecm"), ("par", "maplechrono"), ("par", "riss")]
-    method_cols = []
-    for m in canonical:
-        if m in methods_seen:
-            method_cols.append(m)
-    # Nếu còn method lạ khác thứ tự, thêm vào cuối
-    for m in sorted(methods_seen):
-        if m not in method_cols:
-            method_cols.append(m)
+    def sort_key(enc_sol):
+        enc, sol = enc_sol
+        solver_rank = {"maplecm": 0, "maplechrono": 1, "riss": 2}
+        return (solver_rank.get(sol, 99), sol, enc)
 
-    header = ["Instance", "n", "p", "radius"] + [method_label(solver=m[1], enc=m[0]) for m in method_cols]
+    method_cols = sorted(methods_seen, key=sort_key)
 
-    # Tạo các dòng dữ liệu: mỗi instance đúng 1 dòng
+    # Header CSV
+    header = ["Instance", "n", "p", "radius"] + [
+        method_label(solver=sol, enc=enc) for (enc, sol) in method_cols
+    ]
+
     rows = []
-    solved_by = {method_label(solver=m[1], enc=m[0]): [] for m in method_cols}
-    for (inst, n, p) in sorted(inst_methods.keys(), key=lambda x: (str(x[0]), x[1], x[2])):
-        gR = global_bestR[(inst, n, p)]
-        row = {"Instance": inst, "n": n, "p": p, "radius": gR}
-        for enc, sol in method_cols:
+    # Lưu lại để tính footer Num./Avg.
+    solved_by = {method_label(solver=sol, enc=enc): [] for (enc, sol) in method_cols}
+
+    # Với mỗi instance (inst,n,p) -> đúng 1 dòng
+    for (inst, n, p) in sorted(all_instances, key=lambda x: (str(x[0]), x[1], x[2])):
+        gR = global_bestR.get((inst, n, p))
+        row = {
+            "Instance": inst,
+            "n": n,
+            "p": p,
+            "radius": gR if gR is not None else "-"
+        }
+
+        for (enc, sol) in method_cols:
             col = method_label(solver=sol, enc=enc)
-            ts = times_at_global.get((inst, n, p, enc, sol))
+            ts = times_at_global.get((inst, n, p, enc, sol), [])
             if ts:
                 mean_t = _stats.mean(ts)
                 row[col] = f"{mean_t:.3f}"
                 solved_by[col].append(mean_t)
             else:
                 row[col] = "-"
+
         rows.append(row)
 
-    # Hai dòng footer
+    # Footer Num. và Avg.
     footer_num = {"Instance": "Num.", "n": "", "p": "", "radius": ""}
     footer_avg = {"Instance": "Avg.", "n": "", "p": "", "radius": ""}
-    for enc, sol in method_cols:
+
+    for (enc, sol) in method_cols:
         col = method_label(solver=sol, enc=enc)
         lst = solved_by[col]
-        footer_num[col] = str(len(lst)) if lst else "0"
-        footer_avg[col] = f"{_stats.mean(lst):.3f}" if lst else "-"
+        if lst:
+            footer_num[col] = str(len(lst))
+            footer_avg[col] = f"{_stats.mean(lst):.3f}"
+        else:
+            footer_num[col] = "0"
+            footer_avg[col] = "-"
+
     rows.append(footer_num)
     rows.append(footer_avg)
 
@@ -581,6 +725,7 @@ if __name__ == "__main__":
     args = parse_args()
     instance_data = load_instance_data(args.instances)
 
+    # Chuẩn hoá đường dẫn tương đối theo vị trí instances.json
     base_dir = os.path.dirname(os.path.abspath(args.instances))
     for d in instance_data:
         if "orlib" in d and not os.path.isabs(d["orlib"]):
@@ -589,7 +734,7 @@ if __name__ == "__main__":
     all_results = []
     for inst_desc in instance_data:
         CANCEL.clear()
-        
+
         print(f"[BEGIN] {inst_desc['name']}", flush=True)
         try:
             res = run_experiment(

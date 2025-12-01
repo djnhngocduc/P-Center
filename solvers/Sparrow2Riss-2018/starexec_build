@@ -1,0 +1,55 @@
+#!/bin/bash
+set -e
+
+# check whether we have to build cmake
+BUILD_CMAKE=0
+cmake --version | grep -q " [3-9]\." || BUILD_CMAKE=1
+
+# check if we have to compile cmake 3.0.0 as well
+if [ -f cmake-3.0.0-1-src.tar.bz2 ] && [ "$BUILD_CMAKE" -eq 1 ]
+then
+	# decompress package
+	tar xjf cmake-3.0.0-1-src.tar.bz2 
+	# decompress source
+	tar xjf cmake-3.0.0.tar.bz2
+	
+	# compile
+	pushd cmake-3.0.0/
+	./bootstrap 
+	make cmake -j $(nproc)
+	popd
+
+	# tell this script to use the newly build variant
+	export PATH=$(readlink -e cmake-3.0.0/bin):$PATH
+
+	# check version
+	which cmake
+	cmake --version
+fi
+
+# make sparrow
+cd Sparrow
+make sparrow -j $(nproc)
+mv sparrow ../bin/sparrow
+cd ..
+
+# make riss and coprocessor
+cd riss7
+rm -rf build
+mkdir -p build
+cd build
+cmake .. -DQUIET=ON -DCMAKE_BUILD_TYPE=Release -DDRATPROOF=ON
+
+# build riss binary
+make riss-core -j $(nproc)
+# move riss binary
+mv bin/riss-core ../../bin/riss
+
+# build coprocessor binary
+make coprocessor -j $(nproc)
+# move coprocessor binary
+mv bin/coprocessor ../../bin/coprocessor
+cd ..
+
+# clean up cmake files
+rm -rf cmake-*
