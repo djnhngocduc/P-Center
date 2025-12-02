@@ -1,8 +1,10 @@
 import argparse
 import json
-import time, threading
+import time
+import threading
 import heapq
-import os, sys
+import os
+import sys
 import subprocess
 import tempfile
 from typing import List, Tuple
@@ -13,15 +15,15 @@ from collections import defaultdict
 import statistics as _stats
 import csv
 
-_CANCEL_SHARED = None 
-INF = 10**12
+_CANCEL_SHARED = None
+INF = 10 ** 12
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 EXTERNAL_SOLVERS = {
     "maplecm": (
-        os.path.join(BASE_DIR, "solvers", "Maple_CM", "bin", "starexec_run_default"), 
-        []                                          
+        os.path.join(BASE_DIR, "solvers", "Maple_CM", "bin", "starexec_run_default"),
+        []
     ),
 
     "maplechrono": (
@@ -35,6 +37,7 @@ EXTERNAL_SOLVERS = {
     )
 }
 
+
 def _pool_initializer(cancel_proxy):
     # Mỗi worker nhận proxy dict để đọc Event theo idx
     global _CANCEL_SHARED
@@ -43,19 +46,21 @@ def _pool_initializer(cancel_proxy):
     # In PID worker 1 lần để kiểm chứng ~8 PID cố định
     print(f"[POOL] worker PID={os.getpid()}", file=sys.stderr, flush=True)
 
+
 # ---------------- IO helpers ----------------
 
 def load_instance_data(inst_file: str):
     with open(inst_file, "r", encoding="utf-8", errors="ignore") as f:
         return json.load(f)
-    
+
+
 def load_instance(inst_desc):
     if "tsplib" in inst_desc:
         coords = load_tsplib_coords(inst_desc["tsplib"])
         inst = PCenterSAT.from_coordinates(coords, inst_desc["p"])
 
         inst.radii = sorted(set(inst.radii), reverse=True)
-    
+
         sr = float(inst_desc["seed_radius"])
 
         seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
@@ -70,16 +75,20 @@ def load_instance(inst_desc):
 
         t1 = time.time()
         D = compute_apsp_dijkstra(n_graph, edges)
-        print(f"[APSP] {inst_desc['name']}: done in {time.time()-t1:.2f}s (total load {time.time()-t0:.2f}s)", flush=True)
+        print(
+            f"[APSP] {inst_desc['name']}: done in {time.time() - t1:.2f}s "
+            f"(total load {time.time() - t0:.2f}s)",
+            flush=True
+        )
         inst = PCenterSAT.from_distance_matrix(D, p)
 
         radii_set = set()
         for i in range(n_graph):
-            for j in range(i+1, n_graph):
+            for j in range(i + 1, n_graph):
                 dij = D[i][j]
                 if dij != INF and dij > 0:
                     radii_set.add(dij)
-        
+
         inst.radii = sorted(radii_set, reverse=True)
 
         sr = int(inst_desc["seed_radius"])
@@ -87,6 +96,8 @@ def load_instance(inst_desc):
 
         if seed_idx is None:
             seed_idx = len(inst.radii) - 1
+    else:
+        raise ValueError("Instance description must contain 'tsplib' or 'orlib'")
 
     if inst.radii:
         seed_R = inst.radii[seed_idx]
@@ -125,15 +136,16 @@ def load_tsplib_coords(path: str):
                 coords.append((x, y))
     return coords
 
+
 def load_orlib_edge_list(path: str):
-    edges = [] 
+    edges = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         header = f.readline().strip().split()
-        
+
         n = int(header[0])
         m = int(header[1])
         p = int(header[2])
-        
+
         for _ in range(m):
             line = f.readline()
             if not line:
@@ -141,8 +153,8 @@ def load_orlib_edge_list(path: str):
             parts = line.strip().split()
             if len(parts) < 3:
                 continue
-            u, v, w = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2])  # Giảm chỉ số từ 1 xuống 0
-
+            # Giảm chỉ số từ 1 xuống 0
+            u, v, w = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2])
             edges.append((u, v, w))
 
     return n, p, edges
@@ -187,7 +199,18 @@ def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]) -> List[L
 
     return D
 
-def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii_workers=8, seed_idx=None, mgr=None, cancel_dict=None):
+
+def search_min_radius_parallel(
+    inst,
+    encoding,
+    solver_name,
+    time_limit,
+    *,
+    radii_workers=8,
+    seed_idx=None,
+    mgr=None,
+    cancel_dict=None
+):
     """
     Dùng pool cố định (ProcessPoolExecutor) với max_workers = radii_workers.
     Ngắt mềm job bán kính lớn hơn bằng Event + solver.interrupt().
@@ -235,11 +258,23 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
             R = radii[k]
             print(f"[TASK-SUBMIT] idx={k} R={R}", flush=True)
 
-            fut = ex.submit(_solve_radius_worker_proc, k, inst, encoding, solver_name, R, time_limit)
+            fut = ex.submit(
+                _solve_radius_worker_proc,
+                k,
+                inst,
+                encoding,
+                solver_name,
+                R,
+                time_limit,
+            )
             futs[fut] = k
         return futs
 
-    with ProcessPoolExecutor(max_workers=radii_workers, initializer=_pool_initializer, initargs=(cancel_dict,)) as ex:
+    with ProcessPoolExecutor(
+        max_workers=radii_workers,
+        initializer=_pool_initializer,
+        initargs=(cancel_dict,)
+    ) as ex:
         while i < nR:
             j = min(nR - 1, i + radii_workers - 1)
             need = [k for k in range(i, j + 1) if k not in covered]
@@ -256,7 +291,13 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                     idx, R, status, t_sec, nvars, nclauses, centers = fut.result()
                 except Exception:
                     idx, R = k, radii[k]
-                    status, t_sec, nvars, nclauses, centers = "timeout", 0.0, None, None, None
+                    status, t_sec, nvars, nclauses, centers = (
+                        "timeout",
+                        0.0,
+                        None,
+                        None,
+                        None,
+                    )
                 print(
                     f"[TASK-DONE] idx={idx} R={R} status={status} "
                     f"t_cpu={(t_sec if t_sec is not None else 0.0):.6f}s",
@@ -267,7 +308,11 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
 
                 if nvars is not None and nclauses is not None:
                     best_nvars = nvars if best_nvars is None else min(best_nvars, nvars)
-                    best_nclauses = nclauses if best_nclauses is None else min(best_nclauses, nclauses)
+                    best_nclauses = (
+                        nclauses
+                        if best_nclauses is None
+                        else min(best_nclauses, nclauses)
+                    )
 
                 if status == "sat":
                     sat_solutions[idx] = centers
@@ -280,7 +325,11 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                             if kk < best_sat_in_batch:
                                 try:
                                     cancel_dict[kk].set()
-                                    print(f"[CANCEL] cancel idx={kk} " f"(dominated by SAT at idx={best_sat_in_batch})", flush=True)
+                                    print(
+                                        f"[CANCEL] cancel idx={kk} "
+                                        f"(dominated by SAT at idx={best_sat_in_batch})",
+                                        flush=True
+                                    )
                                 except Exception:
                                     pass
 
@@ -317,8 +366,14 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                     try:
                         idx2, R2, status2, t2, nv2, nc2, centers2 = fut2.result()
                     except Exception:
-                        status2, t2, nv2, nc2, centers2 = "timeout", 0.0, None, None, None
-                    
+                        status2, t2, nv2, nc2, centers2 = (
+                            "timeout",
+                            0.0,
+                            None,
+                            None,
+                            None,
+                        )
+
                     print(
                         f"[REFINE-DONE] idx={idx2} R={R2} status={status2} t_cpu={t2}",
                         flush=True
@@ -326,8 +381,14 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
 
                     decided[nxt] = status2
                     if nv2 is not None and nc2 is not None:
-                        best_nvars = nv2 if best_nvars is None else min(best_nvars, nv2)
-                        best_nclauses = nc2 if best_nclauses is None else min(best_nclauses, nc2)
+                        best_nvars = (
+                            nv2 if best_nvars is None else min(best_nvars, nv2)
+                        )
+                        best_nclauses = (
+                            nc2
+                            if best_nclauses is None
+                            else min(best_nclauses, nc2)
+                        )
 
                     if status2 == "unsat":
                         best_sat_idx = k
@@ -339,14 +400,14 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
                         if cancel_dict is not None:
                             for kk in range(0, nxt):
                                 if kk in cancel_dict:
-                                    try: 
+                                    try:
                                         cancel_dict[kk].set()
                                         print(
                                             f"[CANCEL] cancel idx={kk} "
                                             f"(dominated by deeper SAT at idx={nxt})",
                                             flush=True
                                         )
-                                    except Exception: 
+                                    except Exception:
                                         pass
                         k = nxt
                         continue
@@ -385,7 +446,16 @@ def search_min_radius_parallel(inst, encoding, solver_name, time_limit, *, radii
         flush=True
     )
 
-    return "OK", radii[best_sat_idx], elapsed, best_nvars, best_nclauses, best_centers, best_sat_cpu
+    return (
+        "OK",
+        radii[best_sat_idx],
+        elapsed,
+        best_nvars,
+        best_nclauses,
+        best_centers,
+        best_sat_cpu,
+    )
+
 
 def _write_dimacs(cnf, path):
     with open(path, "w", encoding="utf-8") as f:
@@ -398,6 +468,7 @@ def _write_dimacs(cnf, path):
                 f.write("0\n")
             else:
                 f.write(" ".join(str(l) for l in cl) + " 0\n")
+
 
 def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
     """
@@ -416,12 +487,15 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
         cmd = [bin_path] + extra_args + [cnf_path]
 
+        solver_dir = os.path.dirname(bin_path)
+
         t0 = time.perf_counter()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=solver_dir,
         )
 
         if cancel_ev is not None:
@@ -432,6 +506,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                         proc.kill()
                     except Exception:
                         pass
+
             threading.Thread(target=_watch_cancel, daemon=True).start()
 
         try:
@@ -449,6 +524,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                 proc.communicate(timeout=1)
             except Exception:
                 pass
+            print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
             return "timeout", (time_limit if time_limit else 0.0), None
 
         solver_time = t1 - t0
@@ -477,6 +553,16 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                     except ValueError:
                         continue
 
+        print(
+            f"[SOLVER-RET] solver={solver_name} rc={proc.returncode} "
+            f"raw_status={status} time={solver_time:.6f}s",
+            flush=True
+        )
+
+        if proc.returncode not in (0, 10, 20):
+            print(f"[SOLVER-STDERR]\n{stderr}", flush=True)
+            print(f"[SOLVER-STDOUT]\n{stdout}", flush=True)
+
         if status is None:
             if model_lits:
                 status = "sat"
@@ -484,9 +570,11 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                 status = "error" if proc.returncode not in (10, 20, 0) else "unsat"
 
         if status == "sat" and not model_lits:
-            return "timeout", solver_time, None
+            print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
+            return "error", solver_time, None
 
         return status, solver_time, (model_lits if status == "sat" else None)
+
 
 def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_limit):
     """
@@ -503,19 +591,24 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
     try:
         cnf, varmap = inst._encode_cnf(radius, encoding)
 
-        print(f"[ENCODE] idx={idx} R={radius} |Nc|={len(varmap.get('Nc',[]))} |Nd|={len(varmap.get('Nd',[]))} "
-      f"candidates={len(varmap.get('candidates',[]))} bound={varmap.get('bound')} "
-      f"clauses={0 if cnf is None else len(cnf.clauses)} vars={0 if cnf is None else cnf.nv}",
-      flush=True)
-        
+        print(
+            f"[ENCODE] idx={idx} R={radius} |Nc|={len(varmap.get('Nc', []))} "
+            f"|Nd|={len(varmap.get('Nd', []))} "
+            f"candidates={len(varmap.get('candidates', []))} "
+            f"bound={varmap.get('bound')} "
+            f"clauses={0 if cnf is None else len(cnf.clauses)} "
+            f"vars={0 if cnf is None else cnf.nv}",
+            flush=True
+        )
+
         if cnf is None:
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
                 f"-> UNSAT(by reduction)",
                 flush=True
             )
-            return (idx, radius, "unsat", 0.0, None, None, None)
-        
+            return idx, radius, "unsat", 0.0, None, None, None
+
         if solver_name in EXTERNAL_SOLVERS:
             # cancel_ev lấy từ shared dict
             cancel_ev = None
@@ -529,19 +622,19 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
-                cancel_ev=cancel_ev
+                cancel_ev=cancel_ev,
             )
 
             nvars = cnf.nv
             nclauses = len(cnf.clauses)
 
-            if status == "timeout" or status == "error":
+            if status in ("timeout", "error"):
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> TIMEOUT/ERROR status={status} cpu={solver_time:.6f}s",
+                    f"-> {status.upper()} cpu={solver_time:.6f}s",
                     flush=True
                 )
-                return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
+                return idx, radius, status, solver_time, nvars, nclauses, None
 
             if status == "unsat":
                 print(
@@ -549,44 +642,95 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                     f"-> UNSAT cpu={solver_time:.6f}s",
                     flush=True
                 )
-                return (idx, radius, "unsat", solver_time, nvars, nclauses, None)
+                return idx, radius, "unsat", solver_time, nvars, nclauses, None
 
             # SAT
             model_set = set(model or [])
             y_vars = varmap.get("y", [])
             Nc = set(varmap.get("Nc", []))
             candidates = set(varmap.get("candidates", []))
-            chosen = {j for j, v in enumerate(y_vars) if (v in model_set) and (j in candidates)}
+            chosen = {
+                j
+                for j, v in enumerate(y_vars)
+                if (v in model_set) and (j in candidates)
+            }
             centers = sorted(chosen | Nc)
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
                 f"-> SAT cpu={solver_time:.6f}s centers={centers}",
                 flush=True
             )
-            return (idx, radius, "sat", solver_time, nvars, nclauses, centers)
+            return idx, radius, "sat", solver_time, nvars, nclauses, centers
 
     except Exception as e:
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} -> EXCEPTION {e}",
             flush=True
         )
-        return (idx, radius, "timeout", 0.0, None, None, None)
+        return idx, radius, "timeout", 0.0, None, None, None
+
 
 # ---------------- CLI & Runner ----------------
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instances", type=str, required=True, help="Path to instances.json")
-    ap.add_argument("--encodings", nargs="+", default=["pysat_sc", "pypb_sc", "nsc", "pb_bdd"], help="Encodings to test: pysat_sc pypb_sc nsc pb_bdd")
-    ap.add_argument("--solvers", nargs="+", default=["maplecm", "maplechrono", "sparrow2riss"], help="SAT solvers to use")
-    ap.add_argument("--time-limit", type=int, default=14400, help="Time limit per radius solve (seconds)")
-    ap.add_argument("--radii-workers", type=int, default=8, help="Parallel radii workers")
-    ap.add_argument("--out", type=str, default="results.csv", help="CSV output path")
-    ap.add_argument("--strategy", type=str, choices=["parallel"], default="parallel",
-    help="Radius search strategy (paper compares parallel only)")
+    ap.add_argument(
+        "--instances",
+        type=str,
+        required=True,
+        help="Path to instances.json",
+    )
+    ap.add_argument(
+        "--encodings",
+        nargs="+",
+        default=["pysat_sc", "pypb_sc", "nsc", "pb_bdd"],
+        help="Encodings to test: pysat_sc pypb_sc nsc pb_bdd",
+    )
+    ap.add_argument(
+        "--solvers",
+        nargs="+",
+        default=["maplecm", "maplechrono", "sparrow2riss"],
+        help="SAT solvers to use",
+    )
+    ap.add_argument(
+        "--time-limit",
+        type=int,
+        default=14400,
+        help="Time limit per radius solve (seconds)",
+    )
+    ap.add_argument(
+        "--radii-workers",
+        type=int,
+        default=8,
+        help="Parallel radii workers",
+    )
+    ap.add_argument(
+        "--out",
+        type=str,
+        default="results.csv",
+        help="CSV output path",
+    )
+    ap.add_argument(
+        "--strategy",
+        type=str,
+        choices=["parallel"],
+        default="parallel",
+        help="Radius search strategy (paper compares parallel only)",
+    )
     return ap.parse_args()
 
-def run_experiment(inst_desc, encodings, solvers, time_limit, radii_workers, strategy, *, mgr, cancel_dict):
+
+def run_experiment(
+    inst_desc,
+    encodings,
+    solvers,
+    time_limit,
+    radii_workers,
+    strategy,
+    *,
+    mgr,
+    cancel_dict
+):
     results = []
     inst, seed_idx = load_instance(inst_desc)
     print(
@@ -598,46 +742,52 @@ def run_experiment(inst_desc, encodings, solvers, time_limit, radii_workers, str
 
     for encoding in encodings:
         for solver_name in solvers:
-            for run_id in range(1):  # 5 lần/cấu hình
+            for run_id in range(1):  # có thể tăng lên 5 nếu muốn như paper
                 print(
-                    f"[RUN] instance={inst_desc['name']} run_id={run_id+1} "
+                    f"[RUN] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"encoding={encoding} solver={solver_name}",
                     flush=True
                 )
                 status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu = search_min_radius_parallel(
-                    inst, encoding, solver_name, time_limit,
+                    inst,
+                    encoding,
+                    solver_name,
+                    time_limit,
                     radii_workers=radii_workers,
                     seed_idx=seed_idx,
                     mgr=mgr,
-                    cancel_dict=cancel_dict
+                    cancel_dict=cancel_dict,
                 )
 
                 print(
-                    f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id+1} "
+                    f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"status={status} best_radius={best_radius} "
                     f"elapsed_wall={elapsed_time:.6f}s cpu_time_at_bestR={best_sat_cpu}",
                     flush=True
                 )
 
-                results.append({
-                    "instance": inst_desc["name"],
-                    "n": inst.n,
-                    "p": inst.p,
-                    "encoding": encoding,
-                    "solver": solver_name,
-                    "run_id": run_id + 1,
-                    "status": status,
-                    "best_radius": best_radius if best_radius is not None else None,
-                    "time_sec": elapsed_time,
-                    "cpu_time_at_bestR": best_sat_cpu,
-                    "nvars": nvars,
-                    "nclauses": nclauses,
-                    "centers": json.dumps(centers if centers is not None else [])
-                })
+                results.append(
+                    {
+                        "instance": inst_desc["name"],
+                        "n": inst.n,
+                        "p": inst.p,
+                        "encoding": encoding,
+                        "solver": solver_name,
+                        "run_id": run_id + 1,
+                        "status": status,
+                        "best_radius": best_radius if best_radius is not None else None,
+                        "time_sec": elapsed_time,
+                        "cpu_time_at_bestR": best_sat_cpu,
+                        "nvars": nvars,
+                        "nclauses": nclauses,
+                        "centers": json.dumps(centers if centers is not None else []),
+                    }
+                )
 
     print_instance_summary_for_console(results)
 
     return results
+
 
 def print_instance_summary_for_console(all_results_for_inst):
     # Gom theo cấu hình
@@ -667,12 +817,12 @@ def print_instance_summary_for_console(all_results_for_inst):
     gR = min(cfg_bestR.values())
 
     # chúng ta muốn in theo thứ tự ổn định:
-    # ưu tiên solver MapleCM -> MapleChrono -> Riss
+    # ưu tiên solver MapleCM -> MapleChrono -> Sparrow2Riss
     # trong từng solver thì sort encoding alphabetically
     def sort_key(enc_sol):
         enc, sol = enc_sol
         solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2}
-        return (solver_rank.get(sol, 99), sol, enc)
+        return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(cfg_runs.keys(), key=sort_key)
 
@@ -680,16 +830,26 @@ def print_instance_summary_for_console(all_results_for_inst):
     for (enc, sol) in method_cols:
         runs = cfg_runs[(enc, sol)]
 
-        ts = [x.get("cpu_time_at_bestR") for x in runs
-              if x.get("status") == "OK" and x.get("best_radius") == gR and x.get("cpu_time_at_bestR") is not None]
+        ts = [
+            x.get("cpu_time_at_bestR")
+            for x in runs
+            if x.get("status") == "OK"
+            and x.get("best_radius") == gR
+            and x.get("cpu_time_at_bestR") is not None
+        ]
 
         if ts:
             mean_cpu = _stats.mean(ts)
-            print(f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
-                  f"radius={gR} cpu_mean={mean_cpu:.3f}s ")
+            print(
+                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
+                f"radius={gR} cpu_mean={mean_cpu:.3f}s "
+            )
         else:
-            print(f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
-                  f"radius={gR} cpu_mean=- ")
+            print(
+                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
+                f"radius={gR} cpu_mean=- "
+            )
+
 
 def write_paper_table(all_results, out_csv_path: str):
     def method_label(solver: str, enc: str) -> str:
@@ -743,12 +903,14 @@ def write_paper_table(all_results, out_csv_path: str):
                 and x.get("best_radius") == gR
                 and x.get("cpu_time_at_bestR") is not None
             ):
-                times_at_global[(inst, n, p, enc, sol)].append(x["cpu_time_at_bestR"])
+                times_at_global[(inst, n, p, enc, sol)].append(
+                    x["cpu_time_at_bestR"]
+                )
 
     def sort_key(enc_sol):
         enc, sol = enc_sol
-        solver_rank = {"maplecm": 0, "maplechrono": 1, "riss": 2}
-        return (solver_rank.get(sol, 99), sol, enc)
+        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2}
+        return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(methods_seen, key=sort_key)
 
@@ -759,16 +921,20 @@ def write_paper_table(all_results, out_csv_path: str):
 
     rows = []
     # Lưu lại để tính footer Num./Avg.
-    solved_by = {method_label(solver=sol, enc=enc): [] for (enc, sol) in method_cols}
+    solved_by = {
+        method_label(solver=sol, enc=enc): [] for (enc, sol) in method_cols
+    }
 
     # Với mỗi instance (inst,n,p) -> đúng 1 dòng
-    for (inst, n, p) in sorted(all_instances, key=lambda x: (str(x[0]), x[1], x[2])):
+    for (inst, n, p) in sorted(
+        all_instances, key=lambda x: (str(x[0]), x[1], x[2])
+    ):
         gR = global_bestR.get((inst, n, p))
         row = {
             "Instance": inst,
             "n": n,
             "p": p,
-            "radius": gR if gR is not None else "-"
+            "radius": gR if gR is not None else "-",
         }
 
         for (enc, sol) in method_cols:
@@ -807,6 +973,7 @@ def write_paper_table(all_results, out_csv_path: str):
         for r in rows:
             w.writerow(r)
 
+
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     MGR = mp.Manager()
@@ -835,13 +1002,19 @@ if __name__ == "__main__":
                 args.radii_workers,
                 args.strategy,
                 mgr=MGR,
-                cancel_dict=CANCEL
+                cancel_dict=CANCEL,
             )
             all_results.extend(res)
             print(f"[END] {inst_desc['name']}", flush=True)
         except Exception as e:
-            import traceback; traceback.print_exc()
-            print(f"[WARN] Bỏ qua {inst_desc.get('name')} do lỗi: {e}", flush=True)
+            import traceback
+
+            traceback.print_exc()
+            print(
+                f"[WARN] Bỏ qua {inst_desc.get('name')} do lỗi: {e}",
+                flush=True
+            )
 
     if all_results:
         write_paper_table(all_results, args.out)
+

@@ -188,7 +188,7 @@ int luby() {
 /**-----luby sequence------*/
 
 int cpu_lim = -1;
-inline void setCpuLimit() {
+static inline void setCpuLimit() {
 	if (cpu_lim != -1) {
 		struct rlimit rl;
 		getrlimit(RLIMIT_CPU, &rl);
@@ -200,7 +200,7 @@ inline void setCpuLimit() {
 	}
 }
 
-inline void printFormulaProperties() {
+static inline void printFormulaProperties() {
 	fprintf(stderr, "c %-20s:  %s\n", "Instance name", fileName);
 	fprintf(stderr, "c %-20s:  %d\n", "Number of variables", numVars);
 	fprintf(stderr, "c %-20s:  %d\n", "Number of literals", numLiterals);
@@ -210,11 +210,11 @@ inline void printFormulaProperties() {
 	fprintf(stderr, "c %-20s:  %d\n", "MinClauseSize", minClauseSize);
 	fprintf(stderr, "c %-20s:  %6.4f\n", "Ratio", (float) numClauses / (float) numVars);
 }
-inline void printHeader() {
+static inline void printHeader() {
 	fprintf(stderr, "---------------Sparrow 2014 SAT Solver---------------\n");
 }
 
-inline void printClauseMigrationCounters(){
+static inline void printClauseMigrationCounters(){
 	BIGINT total=statinc2+statdec3;
 	printf("\nc migrations of clauses from x-sat to y-sat (#xor ops = #numTruelit ops):\n");
 	printf("c %-30s: %-9lli (%6.2f X flips)\n", "total migration", total,(double)total/(double)flip);
@@ -225,7 +225,7 @@ inline void printClauseMigrationCounters(){
 	printf(" %-5s: %-6.4f  ", "1<-2", (double) statdec2 / (double) total);
 	printf(" %-5s: %-6.4f\n", "2<-3+", (double) (statdec3-statdec1-statdec2) / (double) total);
 }
-inline void printSolverParameters() {
+static inline void printSolverParameters() {
 	fprintf(stderr, "\nc Sparrow 2014 Parameteres: \n");
 	fprintf(stderr, "c %-20s: %6.4f\n", "c1", c1);
 	fprintf(stderr, "c %-20s: %d\n", "c2", c2);
@@ -259,7 +259,7 @@ inline void printSolverParameters() {
 	fflush(stderr);
 }
 
-inline void printSolution() {
+static inline void printSolution() {
 	register int i;
 	printf("v ");
 	for (i = 1; i <= numVars; i++) {
@@ -285,7 +285,7 @@ void printSolution1line() {
 	printf("0\n");
 }
 
-inline void printEndStatistics() {
+static inline void printEndStatistics() {
 	fprintf(stderr, "c EndStatistics:\n");
 
 	fprintf(stderr, "c %-30s: %-9lli\n", "numFlips", flip);
@@ -308,7 +308,7 @@ inline void printEndStatistics() {
 
 }
 
-inline void printStatsEndFlip() {
+static inline void printStatsEndFlip() {
 	if (numFalse < bestNumFalse) {
 		//fprintf(stderr, "%8lli numFalse: %5d\n", flip, numFalse);
 		bestNumFalse = numFalse;
@@ -608,7 +608,7 @@ void init() {
 }
 
 /** Checks whether the assignment from atom is a satisfying assignment.*/
-inline int  checkAssignment() {
+static inline int  checkAssignment() {
 	register int i;
 	int sat, lit;
 	int *clptr;
@@ -630,7 +630,7 @@ inline int  checkAssignment() {
 	return 1;
 }
 
-inline void  smooth2() { //for all weighted !!!satisfied!!! clauses decrease the score by 1
+static inline void  smooth2() { //for all weighted !!!satisfied!!! clauses decrease the score by 1
 	register int i, c, var;
 	for (i = 0; i < numWeight; i++) {
 		c = weightedClause[i];
@@ -657,7 +657,7 @@ inline void  smooth2() { //for all weighted !!!satisfied!!! clauses decrease the
 	statNumSmooth++;
 }
 
-inline void  updateWeights() { //for all unsat clauses increase the weight by 1.
+static inline void  updateWeights() { //for all unsat clauses increase the weight by 1.
 	statNumWeight++;
 	int i, j;
 	int c, var;
@@ -691,7 +691,7 @@ static inline int pickClauseF(){
 	return flip % numFalse;
 }
 
-inline void pickVar() {
+static inline void pickVar() {
 	register int i, j;
 	int var;
 	int bestScore = -numClauses;
@@ -777,7 +777,7 @@ inline void pickVar() {
 	return;
 }
 
-inline void flipAtom() {
+static inline void flipAtom() {
 	int var;
 	int *ocptr; //occurrence pointer
 	int *clptr; //clause pointer
