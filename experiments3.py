@@ -11,7 +11,6 @@ import multiprocessing as mp
 from collections import defaultdict
 import statistics as _stats
 import csv
-import bisect
 
 _CANCEL_SHARED = None 
 INF = 10**12

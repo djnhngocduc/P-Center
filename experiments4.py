@@ -10,6 +10,7 @@ import tempfile
 from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from encoder import PCenterSAT
+from pysat.solvers import Solver
 import multiprocessing as mp
 from collections import defaultdict
 import statistics as _stats
@@ -21,22 +22,11 @@ INF = 10 ** 12
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 EXTERNAL_SOLVERS = {
-    "maplecm": (
-        os.path.join(BASE_DIR, "solvers", "Maple_CM", "bin", "starexec_run_default"),
-        []
-    ),
-
-    "maplechrono": (
-        os.path.join(BASE_DIR, "solvers", "MapleLCMDistChronoBT", "bin", "starexec_run_default"),
-        []
-    ),
-
     "sparrow2riss": (
         os.path.join(BASE_DIR, "solvers", "Sparrow2Riss-2018", "bin", "starexec_run_default"),
         []
     )
 }
-
 
 def _pool_initializer(cancel_proxy):
     # Mỗi worker nhận proxy dict để đọc Event theo idx
@@ -663,6 +653,85 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                 flush=True
             )
             return idx, radius, "sat", solver_time, nvars, nclauses, centers
+        
+        with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
+            # --- watcher: ngắt mềm nếu parent set Event cho idx này ---
+            cancel_ev = None
+            try:
+                if _CANCEL_SHARED is not None:
+                    cancel_ev = _CANCEL_SHARED.get(idx)
+            except Exception:
+                cancel_ev = None
+
+            watcher = None
+            if cancel_ev is not None and hasattr(solver, "interrupt"):
+                def _watch():
+                    cancel_ev.wait()
+                    try:
+                        solver.interrupt()
+                    except Exception:
+                        pass
+                watcher = threading.Thread(target=_watch, daemon=True)
+                watcher.start()
+            # ------------------------------------------------------------
+
+            timer = None
+            try:
+                if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
+                    timer = threading.Timer(time_limit, solver.interrupt)
+                    timer.start()
+                    t0 = time.perf_counter()
+                    sat = solver.solve_limited(expect_interrupt=True)
+                    t1 = time.perf_counter()
+                else:
+                    t0 = time.perf_counter()
+                    sat = solver.solve()
+                    t1 = time.perf_counter()
+
+                solver_time = t1 - t0
+
+                nvars = cnf.nv
+                nclauses = len(cnf.clauses)
+
+                if sat is None:
+                    print(
+                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                        f"-> TIMEOUT cpu={solver_time:.6f}s",
+                        flush=True
+                    )
+                    return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
+                if not sat:
+                    print(
+                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                        f"-> UNSAT cpu={solver_time:.6f}s",
+                        flush=True
+                    )
+                    return (idx, radius, "unsat", solver_time, nvars, nclauses, None)
+
+                model = solver.get_model() or []
+                if not model:
+                    print(
+                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                        f"-> TIMEOUT(no model) cpu={solver_time:.6f}s",
+                        flush=True
+                    )
+                    return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
+
+                model_set = set(model)
+                y_vars = varmap.get("y", [])
+                Nc = set(varmap.get("Nc", []))
+                candidates = set(varmap.get("candidates", []))
+                chosen = {j for j, v in enumerate(y_vars) if (v in model_set) and (j in candidates)}
+                centers = sorted(chosen | Nc)
+                print(
+                    f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                    f"-> SAT cpu={solver_time:.6f}s centers={centers}",
+                    flush=True
+                )
+                return (idx, radius, "sat", solver_time, nvars, nclauses, centers)
+            finally:
+                if timer:
+                    timer.cancel()
 
     except Exception as e:
         print(
@@ -744,7 +813,7 @@ def run_experiment(
 
     for encoding in encodings:
         for solver_name in solvers:
-            for run_id in range(1):  # có thể tăng lên 5 nếu muốn như paper
+            for run_id in range(1):
                 print(
                     f"[RUN] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"encoding={encoding} solver={solver_name}",
@@ -815,12 +884,8 @@ def print_instance_summary_for_console(all_results_for_inst):
         print(f"instance={inst_name} n={n} p={p} : no feasible radius found")
         return
 
-    # global best radius trên instance
     gR = min(cfg_bestR.values())
 
-    # chúng ta muốn in theo thứ tự ổn định:
-    # ưu tiên solver MapleCM -> MapleChrono -> Sparrow2Riss
-    # trong từng solver thì sort encoding alphabetically
     def sort_key(enc_sol):
         enc, sol = enc_sol
         solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2}
@@ -828,7 +893,6 @@ def print_instance_summary_for_console(all_results_for_inst):
 
     method_cols = sorted(cfg_runs.keys(), key=sort_key)
 
-    # In 1 dòng/ method giống format cũ nhưng thay cpu_mean thành mean CPU@R*
     for (enc, sol) in method_cols:
         runs = cfg_runs[(enc, sol)]
 

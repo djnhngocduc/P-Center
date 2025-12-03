@@ -1,3 +1,0 @@
-#!/bin/bash
-SOLVERDIR="$(dirname "$0")"
-"$SOLVERDIR"/glucose_static "$1"
