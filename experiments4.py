@@ -32,7 +32,7 @@ EXTERNAL_SOLVERS = {
     ),
 
     "sparrow2riss": (
-        os.path.join(BASE_DIR, "solvers", "Sparrow2Riss-2018", "bin", "starexec_run_NOLIMIT"),
+        os.path.join(BASE_DIR, "solvers", "Sparrow2Riss-2018", "bin", "starexec_run_default"),
         []
     )
 }
@@ -495,6 +495,8 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="ignore",
             cwd=solver_dir,
         )
 

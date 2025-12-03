@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+SOLVERDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CNF="$1"
+if [ -z "$CNF" ]; then
+  echo "Usage: $0 <input.cnf>" >&2
+  exit 1
+fi
+
+TMPDIR="$(mktemp -d /tmp/s2rXXXXXX)"
+SEED=0 
+
+"$SOLVERDIR"/SparrowToRiss.sh "$CNF" "$SEED" "$TMPDIR"
+RET=$?
+
+rm -rf "$TMPDIR"
+exit $RET

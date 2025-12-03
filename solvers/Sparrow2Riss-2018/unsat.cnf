@@ -1,0 +1,4 @@
+c Simple UNSAT instance
+p cnf 1 2
+1 0
+-1 0
