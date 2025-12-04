@@ -479,6 +479,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
         solver_dir = os.path.dirname(bin_path)
 
+        t0 = time.perf_counter()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -501,7 +502,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             threading.Thread(target=_watch_cancel, daemon=True).start()
 
         try:
-            t0 = time.perf_counter()
             stdout, stderr = proc.communicate(
                 timeout=time_limit if (time_limit and time_limit > 0) else None
             )
