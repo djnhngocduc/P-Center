@@ -479,7 +479,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
         solver_dir = os.path.dirname(bin_path)
 
-        t0 = time.perf_counter()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -502,6 +501,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             threading.Thread(target=_watch_cancel, daemon=True).start()
 
         try:
+            t0 = time.perf_counter()
             stdout, stderr = proc.communicate(
                 timeout=time_limit if (time_limit and time_limit > 0) else None
             )
@@ -545,12 +545,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                     except ValueError:
                         continue
 
-        print(
-            f"[SOLVER-RET] solver={solver_name} rc={proc.returncode} "
-            f"raw_status={status} time={solver_time:.6f}s",
-            flush=True
-        )
-
         if proc.returncode not in (0, 10, 20):
             print(f"[SOLVER-STDERR]\n{stderr}", flush=True)
             print(f"[SOLVER-STDOUT]\n{stdout}", flush=True)
@@ -559,7 +553,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             if model_lits:
                 status = "sat"
             else:
-                status = "error" if proc.returncode not in (10, 20, 0) else "unsat"
+                status = "error" if proc.returncode not in (0, 10, 20) else "unsat"
 
         if status == "sat" and not model_lits:
             print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
@@ -655,7 +649,6 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
             return idx, radius, "sat", solver_time, nvars, nclauses, centers
         
         with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
-            # --- watcher: ngắt mềm nếu parent set Event cho idx này ---
             cancel_ev = None
             try:
                 if _CANCEL_SHARED is not None:
