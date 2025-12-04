@@ -21,6 +21,8 @@ INF = 10 ** 12
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+_LOCAL_TMPDIR = None
+
 EXTERNAL_SOLVERS = {
     "sparrow2riss": (
         os.path.join(BASE_DIR, "solvers", "Sparrow2Riss-2018", "bin", "starexec_run_default"),
@@ -29,12 +31,17 @@ EXTERNAL_SOLVERS = {
 }
 
 def _pool_initializer(cancel_proxy):
-    # Mỗi worker nhận proxy dict để đọc Event theo idx
-    global _CANCEL_SHARED
+    global _CANCEL_SHARED, _LOCAL_TMPDIR
     _CANCEL_SHARED = cancel_proxy
+    
+    base_tmp = "/dev/shm" if os.path.isdir("/dev/shm") else None
+    _LOCAL_TMPDIR = tempfile.mkdtemp(prefix="pcsat_worker_", dir=base_tmp)
 
-    # In PID worker 1 lần để kiểm chứng ~8 PID cố định
-    print(f"[POOL] worker PID={os.getpid()}", file=sys.stderr, flush=True)
+    print(
+        f"[POOL] worker PID={os.getpid()} tmpdir={_LOCAL_TMPDIR}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 # ---------------- IO helpers ----------------
@@ -448,16 +455,18 @@ def search_min_radius_parallel(
 
 
 def _write_dimacs(cnf, path):
+    nvars = cnf.nv
+    nclauses = len(cnf.clauses)
+
+    lines = [f"p cnf {nvars} {nclauses}\n"]
+    for cl in cnf.clauses:
+        if not cl:
+            lines.append("0\n")
+        else:
+            lines.append(" ".join(str(l) for l in cl) + " 0\n")
+
     with open(path, "w", encoding="utf-8") as f:
-        nvars = cnf.nv
-        nclauses = len(cnf.clauses)
-        f.write(f"p cnf {nvars} {nclauses}\n")
-        for cl in cnf.clauses:
-            if not cl:
-                # mệnh đề rỗng
-                f.write("0\n")
-            else:
-                f.write(" ".join(str(l) for l in cl) + " 0\n")
+        f.writelines(lines)
 
 
 def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
@@ -469,97 +478,115 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
     solver_time: thời gian CPU xấp xỉ (wall-clock tính trong Python)
     model_lits: list[int] model (các literal) nếu SAT, ngược lại None
     """
+    global _LOCAL_TMPDIR
+
     bin_path, extra_args = EXTERNAL_SOLVERS[solver_name]
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cnf_path = os.path.join(tmpdir, "formula.cnf")
-        _write_dimacs(cnf, cnf_path)
+    base_tmp = _LOCAL_TMPDIR if _LOCAL_TMPDIR is not None else tempfile.gettempdir()
 
-        cmd = [bin_path] + extra_args + [cnf_path]
+    cnf_path = os.path.join(
+        base_tmp,
+        f"pcsat_{os.getpid()}_{threading.get_ident()}.cnf",
+    )
 
-        solver_dir = os.path.dirname(bin_path)
+    _write_dimacs(cnf, cnf_path)
 
-        t0 = time.perf_counter()
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            cwd=solver_dir,
+    cmd = [bin_path] + extra_args + [cnf_path]
+
+    solver_dir = os.path.dirname(bin_path)
+
+    env = os.environ.copy()
+    if _LOCAL_TMPDIR is not None:
+        env["TMPDIR"] = _LOCAL_TMPDIR
+
+    t0 = time.perf_counter()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        cwd=solver_dir,
+        env=env,
+    )
+
+    if cancel_ev is not None:
+        def _watch_cancel():
+            cancel_ev.wait()
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_watch_cancel, daemon=True).start()
+
+    try:
+        stdout, stderr = proc.communicate(
+            timeout=time_limit if (time_limit and time_limit > 0) else None
         )
-
-        if cancel_ev is not None:
-            def _watch_cancel():
-                cancel_ev.wait()
-                if proc.poll() is None:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-
-            threading.Thread(target=_watch_cancel, daemon=True).start()
+        t1 = time.perf_counter()
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
         try:
-            stdout, stderr = proc.communicate(
-                timeout=time_limit if (time_limit and time_limit > 0) else None
-            )
-            t1 = time.perf_counter()
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            proc.communicate(timeout=1)
+        except Exception:
+            pass
+        print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
+        return "timeout", (time_limit if time_limit else 0.0), None
+    finally:
+        try:
+            if os.path.exists(cnf_path):
+                os.remove(cnf_path)
+        except Exception:
+            pass
 
-            try:
-                proc.communicate(timeout=1)
-            except Exception:
-                pass
-            print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-            return "timeout", (time_limit if time_limit else 0.0), None
+    solver_time = t1 - t0
 
-        solver_time = t1 - t0
+    status = None
+    model_lits = []
 
-        status = None
-        model_lits = []
-
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("s "):
-                low = line.lower()
-                if "unsat" in low:
-                    status = "unsat"
-                elif "sat" in low:
-                    status = "sat"
-            elif line.startswith("v ") or line.startswith("V "):
-                parts = line.split()[1:]
-                for tok in parts:
-                    if tok == "0":
-                        continue
-                    try:
-                        lit = int(tok)
-                        model_lits.append(lit)
-                    except ValueError:
-                        continue
-
-        if proc.returncode not in (0, 10, 20):
-            print(f"[SOLVER-STDERR]\n{stderr}", flush=True)
-            print(f"[SOLVER-STDOUT]\n{stdout}", flush=True)
-
-        if status is None:
-            if model_lits:
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("s "):
+            low = line.lower()
+            if "unsat" in low:
+                status = "unsat"
+            elif "sat" in low:
                 status = "sat"
-            else:
-                status = "error" if proc.returncode not in (0, 10, 20) else "unsat"
+        elif line.startswith("v ") or line.startswith("V "):
+            parts = line.split()[1:]
+            for tok in parts:
+                if tok == "0":
+                    continue
+                try:
+                    lit = int(tok)
+                    model_lits.append(lit)
+                except ValueError:
+                    continue
 
-        if status == "sat" and not model_lits:
-            print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
-            return "error", solver_time, None
+    if proc.returncode not in (0, 10, 20):
+        print(f"[SOLVER-STDERR]\n{stderr}", flush=True)
+        print(f"[SOLVER-STDOUT]\n{stdout}", flush=True)
 
-        return status, solver_time, (model_lits if status == "sat" else None)
+    if status is None:
+        if model_lits:
+            status = "sat"
+        else:
+            status = "error" if proc.returncode not in (0, 10, 20) else "unsat"
+
+    if status == "sat" and not model_lits:
+        print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
+        return "error", solver_time, None
+
+    return status, solver_time, (model_lits if status == "sat" else None)
 
 
 def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_limit):
