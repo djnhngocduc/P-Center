@@ -51,7 +51,7 @@ class PCenterSAT:
     def _compute_radii(D: List[List[float]]) -> List[float]:
         n = len(D)
         vals = set()
-        INF = 10 ** 14
+        INF = 10 ** 12
         for i in range(n):
             for j in range(i + 1, n):
                 dij = D[i][j]
