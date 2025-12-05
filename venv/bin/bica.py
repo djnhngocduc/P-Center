@@ -1,4 +1,4 @@
-#!/home/nduc/P-Center/venv/bin/python3
+#!/home/nduclilsant/P-Center/venv/bin/python3
 #-*- coding:utf-8 -*-
 ##
 ## bica.py
