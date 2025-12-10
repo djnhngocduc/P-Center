@@ -465,8 +465,8 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
             elif encoding == "nsc":
                 self._encode_atmost_nsc(cnf, lits, bound)
-            elif encoding == "pypb_sc":
-                enc_kind = PBEncType.seqcounter
+            elif encoding == "pypb_adder":
+                enc_kind = PBEncType.adder
                 with _PYSAT_CNF_LOCK:
                     pbcnf = PBEnc.atmost(
                         lits=lits,
@@ -600,7 +600,7 @@ class PCenterSAT:
             return
 
         cfg = PBConfig()
-        cfg.set_PB_Encoder(pblib.PB_BDD) 
+        cfg.set_PB_Encoder(pblib.PB_BDD)
 
         pb2 = Pb2cnf(cfg)
 
