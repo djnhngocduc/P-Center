@@ -3,13 +3,13 @@
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 10,
-    "seed_radius": 457.91
+    "seed_radius": 457.90501198392633
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp", 
     "p": 20,
-    "seed_radius": 309.01420048276094
+    "seed_radius": 309.0142004827609
   },
   {
     "name": "u1817",
@@ -27,66 +27,66 @@
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 50,
-    "seed_radius": 184.91
+    "seed_radius": 184.90517596865686
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 60,
-    "seed_radius": 162.64
+    "seed_radius": 162.63779450054
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 70,
-    "seed_radius": 148.11
+    "seed_radius": 148.10960873623262
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 80,
-    "seed_radius": 136.77
+    "seed_radius": 136.77390138473027
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 90,
-    "seed_radius": 129.51
+    "seed_radius": 129.50725153442156
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 100,
-    "seed_radius": 126.99
+    "seed_radius": 126.9940002519801
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 110,
-    "seed_radius": 109.25
+    "seed_radius": 109.24953089144134
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 120,
-    "seed_radius": 107.76
+    "seed_radius": 107.76307438079108
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 130,
-    "seed_radius": 104.73
+    "seed_radius": 104.72930869627649
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 140,
-    "seed_radius": 101.60
+    "seed_radius": 101.59999999999991
   },
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 150,
-    "seed_radius": 91.60
+    "seed_radius": 91.60319044662126
   }
 ]
