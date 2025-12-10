@@ -74,7 +74,7 @@ def load_instance(inst_desc):
         D = compute_apsp_dijkstra(n_graph, edges)
         print(
             f"[APSP] {inst_desc['name']}: done in {time.time() - t1:.2f}s "
-            f"(total load {time.time() - t0:.2f}s)",
+            f"(total load {time.time() - t0:.2f}s)", 
             flush=True
         )
         inst = PCenterSAT.from_distance_matrix(D, p)
