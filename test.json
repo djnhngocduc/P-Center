@@ -1,0 +1,7 @@
+[
+  {
+    "name": "pmed18",
+    "orlib": "dataset/OR-Lib/pmed18.txt",
+    "seed_radius": 29
+  }
+]

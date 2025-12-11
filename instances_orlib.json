@@ -87,12 +87,12 @@
   {
     "name": "pmed18",
     "orlib": "dataset/OR-Lib/pmed18.txt",
-    "seed_radius": 28
+    "seed_radius": 29
   },
   {
     "name": "pmed19",
     "orlib": "dataset/OR-Lib/pmed19.txt",
-    "seed_radius": 18
+    "seed_radius": 19
   },
   {
     "name": "pmed20",
@@ -112,12 +112,12 @@
   {
     "name": "pmed23",
     "orlib": "dataset/OR-Lib/pmed23.txt",
-    "seed_radius": 22
+    "seed_radius": 23
   },
   {
     "name": "pmed24",
     "orlib": "dataset/OR-Lib/pmed24.txt",
-    "seed_radius": 15
+    "seed_radius": 16
   },
   {
     "name": "pmed25",
@@ -137,7 +137,7 @@
   {
     "name": "pmed28",
     "orlib": "dataset/OR-Lib/pmed28.txt",
-    "seed_radius": 18
+    "seed_radius": 19
   },
   {
     "name": "pmed29",
@@ -162,7 +162,7 @@
   {
     "name": "pmed33",
     "orlib": "dataset/OR-Lib/pmed33.txt",
-    "seed_radius": 15
+    "seed_radius": 17
   },
   {
     "name": "pmed34",
@@ -177,12 +177,12 @@
   {
     "name": "pmed36",
     "orlib": "dataset/OR-Lib/pmed36.txt",
-    "seed_radius": 27
+    "seed_radius": 28
   },
   {
     "name": "pmed37",
     "orlib": "dataset/OR-Lib/pmed37.txt",
-    "seed_radius": 15
+    "seed_radius": 16
   },
   {
     "name": "pmed38",
@@ -192,11 +192,11 @@
   {
     "name": "pmed39",
     "orlib": "dataset/OR-Lib/pmed39.txt",
-    "seed_radius": 23
+    "seed_radius": 24
   },
   {
     "name": "pmed40",
     "orlib": "dataset/OR-Lib/pmed40.txt",
-    "seed_radius": 13
+    "seed_radius": 14
   }
 ]
