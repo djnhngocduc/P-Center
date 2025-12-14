@@ -228,7 +228,7 @@ def search_min_radius_parallel(
     solver_name,
     time_limit,
     *,
-    radii_workers=8,
+    radii_workers=1,
     seed_idx=None,
     mgr=None,
     cancel_dict=None
