@@ -31,6 +31,12 @@ EXTERNAL_SOLVERS = {
     "sparrow2riss": (
         os.path.join(BASE_DIR, "solvers", "Sparrow2Riss-2018", "bin", "starexec_run_default"),
         []
+    ),
+    "painless": (
+        os.path.join(BASE_DIR, "solvers", "painless", "build", "release", "painless_release"),
+        [
+            "-c=8",
+        ]
     )
 }
 
@@ -512,6 +518,14 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     bin_path, extra_args = EXTERNAL_SOLVERS[solver_name]
 
+    if (not os.path.exists(bin_path)) or (not os.access(bin_path, os.X_OK)):
+        print(
+            f"[SOLVER-ERROR] solver={solver_name}: binary not found or not executable: {bin_path}",
+            file=sys.stderr,
+            flush=True
+        )
+        return "error", 0.0, 0.0, None
+
     base_tmp = _LOCAL_TMPDIR if _LOCAL_TMPDIR is not None else tempfile.gettempdir()
 
     cnf_path = os.path.join(
@@ -848,7 +862,7 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss"],
+        default=["maplecm", "maplechrono", "sparrow2riss", "painless"],
         help="SAT solvers to use",
     )
     ap.add_argument(
@@ -977,7 +991,7 @@ def print_instance_summary_for_console(all_results_for_inst):
 
     def sort_key(enc_sol):
         enc, sol = enc_sol
-        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2}
+        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "painless": 3}
         return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(cfg_runs.keys(), key=sort_key)
@@ -1094,7 +1108,7 @@ def write_paper_table(all_results, out_csv_path: str):
 
     def sort_key(enc_sol):
         enc, sol = enc_sol
-        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2}
+        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "painless": 3}
         return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(methods_seen, key=sort_key)
