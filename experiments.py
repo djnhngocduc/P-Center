@@ -15,8 +15,12 @@ import multiprocessing as mp
 from collections import defaultdict
 import statistics as _stats
 import csv
+import resource
+import atexit, shutil
+import traceback
 
 _CANCEL_SHARED = None
+_INST_SHARED = None
 INF = 10 ** 12
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,9 +34,15 @@ EXTERNAL_SOLVERS = {
     )
 }
 
-def _pool_initializer(cancel_proxy):
-    global _CANCEL_SHARED, _LOCAL_TMPDIR
+def _cpu_self_seconds() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return float(usage.ru_utime + usage.ru_stime)
+
+def _pool_initializer(cancel_proxy, inst):
+    global _CANCEL_SHARED, _LOCAL_TMPDIR, _INST_SHARED
+
     _CANCEL_SHARED = cancel_proxy
+    _INST_SHARED = inst
     
     base_tmp = "/dev/shm" if os.path.isdir("/dev/shm") else None
     _LOCAL_TMPDIR = tempfile.mkdtemp(prefix="pcsat_worker_", dir=base_tmp)
@@ -42,6 +52,15 @@ def _pool_initializer(cancel_proxy):
         file=sys.stderr,
         flush=True,
     )
+
+    def _cleanup_tmp(): 
+        try:
+            if _LOCAL_TMPDIR and os.path.isdir(_LOCAL_TMPDIR):
+                shutil.rmtree(_LOCAL_TMPDIR, ignore_errors=True)
+        except Exception:
+            pass
+
+    atexit.register(_cleanup_tmp)
 
 
 # ---------------- IO helpers ----------------
@@ -216,17 +235,17 @@ def search_min_radius_parallel(
     nR = len(radii)
     start_wall = time.time()
     if nR == 0:
-        return "infeasible", None, 0.0, None, None, None, None
+        return "infeasible", None, 0.0, None, None, None, None, None
 
     decided = {}
     best_nvars = None
     best_nclauses = None
     sat_solutions = {}
     sat_cpu_time = {}
+    sat_wall_time = {}
 
     # seed mặc định = 0 (bán kính lớn nhất)
     i = seed_idx if (seed_idx is not None and 0 <= seed_idx < nR) else 0
-    covered = set()
     best_sat_idx = None
 
     print(
@@ -258,7 +277,6 @@ def search_min_radius_parallel(
             fut = ex.submit(
                 _solve_radius_worker_proc,
                 k,
-                inst,
                 encoding,
                 solver_name,
                 R,
@@ -270,11 +288,11 @@ def search_min_radius_parallel(
     with ProcessPoolExecutor(
         max_workers=radii_workers,
         initializer=_pool_initializer,
-        initargs=(cancel_dict,)
+        initargs=(cancel_dict, inst)
     ) as ex:
         while i < nR:
             j = min(nR - 1, i + radii_workers - 1)
-            need = [k for k in range(i, j + 1) if k not in covered]
+            need = [k for k in range(i, j + 1) if k not in decided]
             if not need:
                 i = j + 1
                 continue
@@ -285,11 +303,19 @@ def search_min_radius_parallel(
             for fut in as_completed(futs):
                 k = futs[fut]
                 try:
-                    idx, R, status, t_sec, nvars, nclauses, centers = fut.result()
+                    idx, R, status, wall_sec, cpu_sec, nvars, nclauses, centers = fut.result()
                 except Exception:
+                    tb = traceback.format_exc()
+                    print(
+                        f"[FUTURE-EXCEPTION] k={k} R={radii[k]}\n{tb}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
                     idx, R = k, radii[k]
-                    status, t_sec, nvars, nclauses, centers = (
-                        "timeout",
+                    status, wall_sec, cpu_sec, nvars, nclauses, centers = (
+                        "error",
+                        0.0,
                         0.0,
                         None,
                         None,
@@ -297,7 +323,7 @@ def search_min_radius_parallel(
                     )
                 print(
                     f"[TASK-DONE] idx={idx} R={R} status={status} "
-                    f"t_cpu={(t_sec if t_sec is not None else 0.0):.6f}s",
+                    f"wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                     flush=True
                 )
 
@@ -313,7 +339,8 @@ def search_min_radius_parallel(
 
                 if status == "sat":
                     sat_solutions[idx] = centers
-                    sat_cpu_time[idx] = t_sec
+                    sat_cpu_time[idx] = cpu_sec
+                    sat_wall_time[idx] = wall_sec
                     if (best_sat_in_batch is None) or (idx > best_sat_in_batch):
                         best_sat_in_batch = idx
                     # NGẮT MỀM mọi job có idx < idx_sat (bán kính lớn hơn)
@@ -329,8 +356,6 @@ def search_min_radius_parallel(
                                     )
                                 except Exception:
                                     pass
-
-            covered.update(need)
 
             # Co dần nếu có SAT trong batch
             if best_sat_in_batch is not None:
@@ -361,10 +386,12 @@ def search_min_radius_parallel(
                     # không cần as_completed loop phức tạp vì chỉ 1 future
                     fut2 = next(iter(futs2.keys()))
                     try:
-                        idx2, R2, status2, t2, nv2, nc2, centers2 = fut2.result()
+                        idx2, R2, status2, wall_sec2, cpu_sec2, nv2, nc2, centers2 = fut2.result()
                     except Exception:
-                        status2, t2, nv2, nc2, centers2 = (
+                        idx2, R2 = nxt, radii[nxt]
+                        status2, wall_sec2, cpu_sec2, nv2, nc2, centers2 = (
                             "timeout",
+                            0.0,
                             0.0,
                             None,
                             None,
@@ -372,7 +399,7 @@ def search_min_radius_parallel(
                         )
 
                     print(
-                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2} t_cpu={t2}",
+                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2} wall={wall_sec2:.6f}s cpu={cpu_sec2:.6f}s",
                         flush=True
                     )
 
@@ -392,7 +419,8 @@ def search_min_radius_parallel(
                         break
                     elif status2 == "sat":
                         sat_solutions[nxt] = centers2
-                        sat_cpu_time[nxt] = t2
+                        sat_cpu_time[nxt] = cpu_sec2
+                        sat_wall_time[nxt] = wall_sec2
                         # NGẮT MỀM mọi job có idx < nxt
                         if cancel_dict is not None:
                             for kk in range(0, nxt):
@@ -432,14 +460,15 @@ def search_min_radius_parallel(
                 "[RESULT] infeasible (no SAT found at any radius)",
                 flush=True
             )
-            return "infeasible", None, elapsed, best_nvars, best_nclauses, None, None
+            return "infeasible", None, elapsed, best_nvars, best_nclauses, None, None, None
 
     best_centers = sat_solutions.get(best_sat_idx, None)
     best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
+    best_sat_wall = sat_wall_time.get(best_sat_idx, None)
 
     print(
         f"[RESULT] status=OK best_idx={best_sat_idx} best_R={radii[best_sat_idx]} "
-        f"elapsed_wall={elapsed:.6f}s cpu_at_best={best_sat_cpu}",
+        f"elapsed_wall={elapsed:.6f}s cpu={best_sat_cpu} wall={best_sat_wall}",
         flush=True
     )
 
@@ -451,6 +480,7 @@ def search_min_radius_parallel(
         best_nclauses,
         best_centers,
         best_sat_cpu,
+        best_sat_wall
     )
 
 
@@ -491,13 +521,19 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     _write_dimacs(cnf, cnf_path)
 
-    cmd = [bin_path] + extra_args + [cnf_path]
-
     solver_dir = os.path.dirname(bin_path)
 
     env = os.environ.copy()
     if _LOCAL_TMPDIR is not None:
         env["TMPDIR"] = _LOCAL_TMPDIR
+    
+    time_bin = "/usr/bin/time"
+    use_time_wrapper = os.path.exists(time_bin) and os.access(time_bin, os.X_OK)
+
+    if use_time_wrapper:
+        cmd = [time_bin, "-p", bin_path] + extra_args + [cnf_path]
+    else:
+        cmd = [bin_path] + extra_args + [cnf_path]
 
     t0 = time.perf_counter()
     proc = subprocess.Popen(
@@ -538,7 +574,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
         except Exception:
             pass
         print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        return "timeout", (time_limit if time_limit else 0.0), None
+        return "timeout", (time_limit if time_limit else 0.0), (time_limit if time_limit else 0.0), None
     finally:
         try:
             if os.path.exists(cnf_path):
@@ -546,7 +582,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
         except Exception:
             pass
 
-    solver_time = t1 - t0
+    wall_time = t1 - t0
 
     status = None
     model_lits = []
@@ -572,6 +608,29 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                 except ValueError:
                     continue
 
+    cpu_time = None
+    if use_time_wrapper:
+        user_t = None
+        sys_t = None 
+        for line in stderr.splitlines():
+            s = line.strip()
+            if s.startswith("user "):
+                try:
+                    user_t = float(s.split()[1])
+                except Exception:
+                    pass
+            elif s.startswith("sys "):
+                try:
+                    sys_t = float(s.split()[1])
+                except Exception:
+                    pass
+        if user_t is not None and sys_t is not None:
+            cpu_time = user_t + sys_t
+        
+    if cpu_time is None:
+        cpu_time = wall_time
+            
+
     if proc.returncode not in (0, 10, 20):
         print(f"[SOLVER-STDERR]\n{stderr}", flush=True)
         print(f"[SOLVER-STDOUT]\n{stdout}", flush=True)
@@ -584,15 +643,15 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     if status == "sat" and not model_lits:
         print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
-        return "error", solver_time, None
+        return "error", wall_time, cpu_time, None
 
-    return status, solver_time, (model_lits if status == "sat" else None)
+    return status, wall_time, cpu_time, (model_lits if status == "sat" else None)
 
 
-def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_limit):
+def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     """
     Chạy trong process pool (executor). Trả về:
-    (idx, radius, status, elapsed, nvars, nclauses, centers)
+    (idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, centers)
     """
     pid = os.getpid()
     print(
@@ -602,7 +661,8 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
     )
 
     try:
-        cnf, varmap = inst._encode_cnf(radius, encoding)
+        global _INST_SHARED
+        cnf, varmap = _INST_SHARED._encode_cnf(radius, encoding)
 
         print(
             f"[ENCODE] idx={idx} R={radius} |Nc|={len(varmap.get('Nc', []))} "
@@ -620,7 +680,7 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                 f"-> UNSAT(by reduction)",
                 flush=True
             )
-            return idx, radius, "unsat", 0.0, None, None, None
+            return idx, radius, "unsat", 0.0, 0.0, None, None, None
 
         if solver_name in EXTERNAL_SOLVERS:
             # cancel_ev lấy từ shared dict
@@ -631,7 +691,7 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
             except Exception:
                 cancel_ev = None
 
-            status, solver_time, model = _run_external_solver(
+            status, wall_sec, cpu_sec, model = _run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
@@ -644,18 +704,18 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
             if status in ("timeout", "error"):
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> {status.upper()} cpu={solver_time:.6f}s",
+                    f"-> {status.upper()} wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                     flush=True
                 )
-                return idx, radius, status, solver_time, nvars, nclauses, None
+                return idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, None
 
             if status == "unsat":
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> UNSAT cpu={solver_time:.6f}s",
+                    f"-> UNSAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                     flush=True
                 )
-                return idx, radius, "unsat", solver_time, nvars, nclauses, None
+                return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None
 
             # SAT
             model_set = set(model or [])
@@ -670,10 +730,10 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
             centers = sorted(chosen | Nc)
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> SAT cpu={solver_time:.6f}s centers={centers}",
+                f"-> SAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s centers={centers}",
                 flush=True
             )
-            return idx, radius, "sat", solver_time, nvars, nclauses, centers
+            return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers
         
         with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
             cancel_ev = None
@@ -700,15 +760,21 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                 if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
+                    cpu0 = _cpu_self_seconds()
                     t0 = time.perf_counter()
                     sat = solver.solve_limited(expect_interrupt=True)
-                    t1 = time.perf_counter()
-                else:
-                    t0 = time.perf_counter()
-                    sat = solver.solve()
+                    cpu1 = _cpu_self_seconds()
                     t1 = time.perf_counter()
 
-                solver_time = t1 - t0
+                else:
+                    cpu0 = _cpu_self_seconds()
+                    t0 = time.perf_counter()
+                    sat = solver.solve()
+                    cpu1 = _cpu_self_seconds()
+                    t1 = time.perf_counter()
+
+                wall_sec = t1 - t0
+                cpu_sec = cpu1 - cpu0
 
                 nvars = cnf.nv
                 nclauses = len(cnf.clauses)
@@ -716,26 +782,26 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                 if sat is None:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT cpu={solver_time:.6f}s",
+                        f"-> TIMEOUT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
+                    return (idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None)
                 if not sat:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> UNSAT cpu={solver_time:.6f}s",
+                        f"-> UNSAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return (idx, radius, "unsat", solver_time, nvars, nclauses, None)
+                    return (idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None)
 
                 model = solver.get_model() or []
                 if not model:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT(no model) cpu={solver_time:.6f}s",
+                        f"-> TIMEOUT(no model) wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return (idx, radius, "timeout", solver_time, nvars, nclauses, None)
+                    return (idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None)
 
                 model_set = set(model)
                 y_vars = varmap.get("y", [])
@@ -745,20 +811,22 @@ def _solve_radius_worker_proc(idx, inst, encoding, solver_name, radius, time_lim
                 centers = sorted(chosen | Nc)
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> SAT cpu={solver_time:.6f}s centers={centers}",
+                    f"-> SAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s centers={centers}",
                     flush=True
                 )
-                return (idx, radius, "sat", solver_time, nvars, nclauses, centers)
+                return (idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers)
             finally:
                 if timer:
                     timer.cancel()
 
     except Exception as e:
+        tb = traceback.format_exc()
         print(
-            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> EXCEPTION {e}",
+            f"[WORKER-END] pid={pid} idx={idx} R={radius}\n{tb}",
+            file=sys.stderr,
             flush=True
         )
-        return idx, radius, "timeout", 0.0, None, None, None
+        return idx, radius, "error", 0.0, 0.0, None, None, None
 
 
 # ---------------- CLI & Runner ----------------
@@ -839,7 +907,7 @@ def run_experiment(
                     f"encoding={encoding} solver={solver_name}",
                     flush=True
                 )
-                status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu = search_min_radius_parallel(
+                status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu, best_sat_wall = search_min_radius_parallel(
                     inst,
                     encoding,
                     solver_name,
@@ -853,7 +921,7 @@ def run_experiment(
                 print(
                     f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"status={status} best_radius={best_radius} "
-                    f"elapsed_wall={elapsed_time:.6f}s cpu_time_at_bestR={best_sat_cpu}",
+                    f"elapsed_wall={elapsed_time:.6f}s wall={best_sat_wall} cpu={best_sat_cpu}",
                     flush=True
                 )
 
@@ -868,7 +936,8 @@ def run_experiment(
                         "status": status,
                         "best_radius": best_radius if best_radius is not None else None,
                         "time_sec": elapsed_time,
-                        "cpu_time_at_bestR": best_sat_cpu,
+                        "cpu": best_sat_cpu,
+                        "wall": best_sat_wall,
                         "nvars": nvars,
                         "nclauses": nclauses,
                         "centers": json.dumps(centers if centers is not None else []),
@@ -916,16 +985,16 @@ def print_instance_summary_for_console(all_results_for_inst):
     for (enc, sol) in method_cols:
         runs = cfg_runs[(enc, sol)]
 
-        ts = [
-            x.get("cpu_time_at_bestR")
+        cpus = [
+            x.get("cpu")
             for x in runs
             if x.get("status") == "OK"
             and x.get("best_radius") == gR
-            and x.get("cpu_time_at_bestR") is not None
+            and x.get("cpu") is not None
         ]
 
-        if ts:
-            mean_cpu = _stats.mean(ts)
+        if cpus:
+            mean_cpu = _stats.mean(cpus)
             print(
                 f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
                 f"radius={gR} cpu_mean={mean_cpu:.3f}s "
@@ -936,10 +1005,36 @@ def print_instance_summary_for_console(all_results_for_inst):
                 f"radius={gR} cpu_mean=- "
             )
 
+        walls = [
+            x.get("wall")
+            for x in runs
+            if x.get("status") == "OK"
+            and x.get("best_radius") == gR
+            and x.get("wall") is not None
+        ]
+
+        if walls:
+            mean_wall = _stats.mean(walls)
+            print(
+                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
+                f"radius={gR} wall_mean={mean_wall:.3f}s "
+            )
+        else:
+            print(
+                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
+                f"radius={gR} wall_mean=- "
+            )
+
 
 def write_paper_table(all_results, out_csv_path: str):
     def method_label(solver: str, enc: str) -> str:
         return f"{solver} {enc}"
+    
+    def col_cpu(method: str) -> str:
+        return f"{method} cpu"
+
+    def col_wall(method: str) -> str:
+        return f"{method} wall"
 
     # Gom per-run theo cấu hình
     cfg_runs = defaultdict(list)  # (inst,n,p,enc,sol) -> [rows]
@@ -977,21 +1072,25 @@ def write_paper_table(all_results, out_csv_path: str):
 
     # Thời gian theo method tại đúng global_bestR
     # key: (inst,n,p,enc,sol) -> list times khi run đạt global_bestR
-    times_at_global = defaultdict(list)
+    walls_at_global = defaultdict(list)
+    cpus_at_global = defaultdict(list)
     for (inst, n, p, enc, sol), runs in cfg_runs.items():
         gR = global_bestR.get((inst, n, p))
         if gR is None:
             continue
         for x in runs:
-            # ta chỉ collect time nếu run đạt gR của instance
-            if (
-                x.get("status") == "OK"
-                and x.get("best_radius") == gR
-                and x.get("cpu_time_at_bestR") is not None
-            ):
-                times_at_global[(inst, n, p, enc, sol)].append(
-                    x["cpu_time_at_bestR"]
-                )
+            if x.get("status") != "OK":
+                continue
+            if x.get("best_radius") != gR:
+                continue
+            
+            cpu_v = x.get("cpu")
+            wall_v = x.get("wall")
+
+            if cpu_v is not None:
+                cpus_at_global[(inst, n, p, enc, sol)].append(cpu_v)
+            if wall_v is not None:
+                walls_at_global[(inst, n, p, enc, sol)].append(wall_v)
 
     def sort_key(enc_sol):
         enc, sol = enc_sol
@@ -1001,15 +1100,16 @@ def write_paper_table(all_results, out_csv_path: str):
     method_cols = sorted(methods_seen, key=sort_key)
 
     # Header CSV
-    header = ["Instance", "n", "p", "radius"] + [
-        method_label(solver=sol, enc=enc) for (enc, sol) in method_cols
-    ]
+    header = ["Instance", "n", "p", "radius"]
+    for (enc, sol) in method_cols:
+        m = method_label(solver=sol, enc=enc)
+        header.append(col_wall(m))
+        header.append(col_cpu(m))
 
     rows = []
-    # Lưu lại để tính footer Num./Avg.
-    solved_by = {
-        method_label(solver=sol, enc=enc): [] for (enc, sol) in method_cols
-    }
+    # để tính footer Num./Avg. cho từng cột
+    solved_wall = {col_wall(method_label(sol, enc)): [] for (enc, sol) in method_cols}
+    solved_cpu = {col_cpu(method_label(sol, enc)): [] for (enc, sol) in method_cols}
 
     # Với mỗi instance (inst,n,p) -> đúng 1 dòng
     for (inst, n, p) in sorted(
@@ -1024,14 +1124,26 @@ def write_paper_table(all_results, out_csv_path: str):
         }
 
         for (enc, sol) in method_cols:
-            col = method_label(solver=sol, enc=enc)
-            ts = times_at_global.get((inst, n, p, enc, sol), [])
-            if ts:
-                mean_t = _stats.mean(ts)
-                row[col] = f"{mean_t:.3f}"
-                solved_by[col].append(mean_t)
+            m = method_label(solver=sol, enc=enc)
+            c_cpu = col_cpu(m)
+            c_wall = col_wall(m)
+
+            ts_cpu = cpus_at_global.get((inst, n, p, enc, sol), [])
+            ts_wall = walls_at_global.get((inst, n, p, enc, sol), [])
+
+            if ts_cpu:
+                mean_cpu = _stats.mean(ts_cpu)
+                row[c_cpu] = f"{mean_cpu:.3f}"
+                solved_cpu[c_cpu].append(mean_cpu)
             else:
-                row[col] = "-"
+                row[c_cpu] = "-"
+
+            if ts_wall:
+                mean_wall = _stats.mean(ts_wall)
+                row[c_wall] = f"{mean_wall:.3f}"
+                solved_wall[c_wall].append(mean_wall)
+            else:
+                row[c_wall] = "-"
 
         rows.append(row)
 
@@ -1040,14 +1152,18 @@ def write_paper_table(all_results, out_csv_path: str):
     footer_avg = {"Instance": "Avg.", "n": "", "p": "", "radius": ""}
 
     for (enc, sol) in method_cols:
-        col = method_label(solver=sol, enc=enc)
-        lst = solved_by[col]
-        if lst:
-            footer_num[col] = str(len(lst))
-            footer_avg[col] = f"{_stats.mean(lst):.3f}"
-        else:
-            footer_num[col] = "0"
-            footer_avg[col] = "-"
+        m = method_label(solver=sol, enc=enc)
+        c_wall = col_wall(m)
+        c_cpu = col_cpu(m)
+
+        lst_wall = solved_wall.get(c_wall, [])
+        lst_cpu = solved_cpu.get(c_cpu, [])
+
+        footer_num[c_wall] = str(len(lst_wall)) if lst_wall else "0"
+        footer_avg[c_wall] = f"{_stats.mean(lst_wall):.3f}" if lst_wall else "-"
+
+        footer_num[c_cpu] = str(len(lst_cpu)) if lst_cpu else "0"
+        footer_avg[c_cpu] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
 
     rows.append(footer_num)
     rows.append(footer_avg)
@@ -1093,8 +1209,6 @@ if __name__ == "__main__":
             all_results.extend(res)
             print(f"[END] {inst_desc['name']}", flush=True)
         except Exception as e:
-            import traceback
-
             traceback.print_exc()
             print(
                 f"[WARN] Bỏ qua {inst_desc.get('name')} do lỗi: {e}",
