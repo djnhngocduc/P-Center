@@ -49,6 +49,7 @@ EXTERNAL_SOLVERS = {
         os.path.join(BASE_DIR, "solvers", "painless", "build", "release", "painless_release"),
         [
             "-c=8",
+            "-solver=kclgmMyt"
         ]
     )
 }
