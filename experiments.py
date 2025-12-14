@@ -1189,6 +1189,83 @@ def write_paper_table(all_results, out_csv_path: str):
         for r in rows:
             w.writerow(r)
 
+def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wall"):
+    """
+    Trả về list các dòng thắng của Painless theo từng instance.
+    metric: "cpu" | "wall" | "time_sec"
+    tie_break: dùng khi hoà
+    """
+    by_inst = defaultdict(list)
+    for r in all_results:
+        by_inst[(r["instance"], r["n"], r["p"])].append(r)
+
+    wins = []
+
+    for (inst, n, p), rows in sorted(by_inst.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+        feas = [x["best_radius"] for x in rows if x.get("best_radius") is not None]
+        if not feas:
+            continue
+        gR = min(feas)
+
+        # candidates đạt đúng global best radius
+        cand = [
+            x for x in rows
+            if x.get("status") == "OK"
+            and x.get("best_radius") == gR
+            and x.get(metric) is not None
+        ]
+        if not cand:
+            continue
+
+        # best per solver (min qua encodings)
+        best_by_solver = {}
+        for x in cand:
+            sol = x["solver"]
+            t = x[metric]
+            tb = x.get(tie_break)
+            key = (t, tb if tb is not None else float("inf"), x.get("encoding", ""))
+            if sol not in best_by_solver or key < best_by_solver[sol]["key"]:
+                best_by_solver[sol] = {"row": x, "key": key}
+
+        best_list = []
+        for sol, v in best_by_solver.items():
+            best_list.append((v["key"], sol, v["row"]))
+        best_list.sort(key=lambda z: (z[0][0], z[0][1], z[1]))  # metric, tie_break, solvername
+
+        _, winner_solver, winner_row = best_list[0]
+        if winner_solver == "painless":
+            wins.append({
+                "instance": inst,
+                "n": n,
+                "p": p,
+                "radius": gR,
+                "winner": "painless",
+                "encoding": winner_row.get("encoding"),
+                metric: winner_row.get(metric),
+                tie_break: winner_row.get(tie_break),
+            })
+
+    return wins
+
+def print_painless_wins(all_results, metric="cpu", tie_break="wall"):
+    wins = list_instances_where_painless_wins(all_results, metric=metric, tie_break=tie_break)
+
+    print(f"\n=== Painless wins by {metric} (tie-break {tie_break}) ===")
+    if not wins:
+        print("No instance where painless is the winner.")
+        return
+
+    for w in wins:
+        t = w.get(metric)
+        tb = w.get(tie_break)
+        print(
+            f"instance={w['instance']} n={w['n']} p={w['p']} "
+            f"R*={w['radius']} enc={w['encoding']} "
+            f"{metric}={t:.6f} {tie_break}={tb:.6f}"
+        )
+
+
+
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
@@ -1231,4 +1308,5 @@ if __name__ == "__main__":
 
     if all_results:
         write_paper_table(all_results, args.out)
+        print_painless_wins(all_results, metric="cpu", tie_break="wall")
 
