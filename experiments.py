@@ -18,6 +18,19 @@ import csv
 import resource
 import atexit, shutil
 import traceback
+import re 
+
+_WIN_RE = re.compile(r"The winner is\s+([A-Za-z0-9_+\-]+)\(")
+
+def _extract_painless_winner(stdout: str) -> str | None:
+    # Painless thường in log dạng "c ... The winner is kissat(..."
+    winner = None
+    for line in stdout.splitlines():
+        if "The winner is" in line:
+            m = _WIN_RE.search(line)
+            if m:
+                winner = m.group(1)  # ví dụ: "kissat", "glucose", ...
+    return winner
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
@@ -658,6 +671,12 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
     if status == "sat" and not model_lits:
         print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
         return "error", wall_time, cpu_time, None
+    
+    winner = None 
+    if solver_name == "painless":
+        winner = _extract_painless_winner(stdout)
+        if winner is not None:
+            print(f"[PAINLESS-WINNER] solver={solver_name} winner={winner}", flush=True)
 
     return status, wall_time, cpu_time, (model_lits if status == "sat" else None)
 
