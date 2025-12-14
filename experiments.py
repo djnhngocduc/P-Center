@@ -262,6 +262,7 @@ def search_min_radius_parallel(
     sat_solutions = {}
     sat_cpu_time = {}
     sat_wall_time = {}
+    sat_winner = {}
 
     # seed mặc định = 0 (bán kính lớn nhất)
     i = seed_idx if (seed_idx is not None and 0 <= seed_idx < nR) else 0
@@ -322,7 +323,7 @@ def search_min_radius_parallel(
             for fut in as_completed(futs):
                 k = futs[fut]
                 try:
-                    idx, R, status, wall_sec, cpu_sec, nvars, nclauses, centers = fut.result()
+                    idx, R, status, wall_sec, cpu_sec, nvars, nclauses, centers, winner = fut.result()
                 except Exception:
                     tb = traceback.format_exc()
                     print(
@@ -332,10 +333,11 @@ def search_min_radius_parallel(
                     )
 
                     idx, R = k, radii[k]
-                    status, wall_sec, cpu_sec, nvars, nclauses, centers = (
+                    status, wall_sec, cpu_sec, nvars, nclauses, centers, winner = (
                         "error",
                         0.0,
                         0.0,
+                        None,
                         None,
                         None,
                         None,
@@ -360,6 +362,7 @@ def search_min_radius_parallel(
                     sat_solutions[idx] = centers
                     sat_cpu_time[idx] = cpu_sec
                     sat_wall_time[idx] = wall_sec
+                    sat_winner[idx] = winner
                     if (best_sat_in_batch is None) or (idx > best_sat_in_batch):
                         best_sat_in_batch = idx
                     # NGẮT MỀM mọi job có idx < idx_sat (bán kính lớn hơn)
@@ -405,13 +408,14 @@ def search_min_radius_parallel(
                     # không cần as_completed loop phức tạp vì chỉ 1 future
                     fut2 = next(iter(futs2.keys()))
                     try:
-                        idx2, R2, status2, wall_sec2, cpu_sec2, nv2, nc2, centers2 = fut2.result()
+                        idx2, R2, status2, wall_sec2, cpu_sec2, nv2, nc2, centers2, winner2 = fut2.result()
                     except Exception:
                         idx2, R2 = nxt, radii[nxt]
-                        status2, wall_sec2, cpu_sec2, nv2, nc2, centers2 = (
+                        status2, wall_sec2, cpu_sec2, nv2, nc2, centers2, winner2 = (
                             "timeout",
                             0.0,
                             0.0,
+                            None,
                             None,
                             None,
                             None,
@@ -440,6 +444,7 @@ def search_min_radius_parallel(
                         sat_solutions[nxt] = centers2
                         sat_cpu_time[nxt] = cpu_sec2
                         sat_wall_time[nxt] = wall_sec2
+                        sat_winner[nxt] = winner2
                         # NGẮT MỀM mọi job có idx < nxt
                         if cancel_dict is not None:
                             for kk in range(0, nxt):
@@ -479,7 +484,7 @@ def search_min_radius_parallel(
                 "[RESULT] infeasible (no SAT found at any radius)",
                 flush=True
             )
-            return "infeasible", None, elapsed, best_nvars, best_nclauses, None, None, None
+            return "infeasible", None, elapsed, best_nvars, best_nclauses, None, None, None, None
 
     best_centers = sat_solutions.get(best_sat_idx, None)
     best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
@@ -491,6 +496,8 @@ def search_min_radius_parallel(
         flush=True
     )
 
+    best_winner = sat_winner.get(best_sat_idx, None)
+
     return (
         "OK",
         radii[best_sat_idx],
@@ -499,7 +506,8 @@ def search_min_radius_parallel(
         best_nclauses,
         best_centers,
         best_sat_cpu,
-        best_sat_wall
+        best_sat_wall,
+        best_winner,
     )
 
 
@@ -537,7 +545,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             file=sys.stderr,
             flush=True
         )
-        return "error", 0.0, 0.0, None
+        return "error", 0.0, 0.0, None, None
 
     base_tmp = _LOCAL_TMPDIR if _LOCAL_TMPDIR is not None else tempfile.gettempdir()
 
@@ -601,7 +609,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
         except Exception:
             pass
         print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        return "timeout", (time_limit if time_limit else 0.0), (time_limit if time_limit else 0.0), None
+        return "timeout", (time_limit if time_limit else 0.0), (time_limit if time_limit else 0.0), None, None
     finally:
         try:
             if os.path.exists(cnf_path):
@@ -670,15 +678,13 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     if status == "sat" and not model_lits:
         print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
-        return "error", wall_time, cpu_time, None
+        return "error", wall_time, cpu_time, None, None
     
     winner = None 
     if solver_name == "painless":
         winner = _extract_painless_winner(stdout)
-        if winner is not None:
-            print(f"[PAINLESS-WINNER] solver={solver_name} winner={winner}", flush=True)
 
-    return status, wall_time, cpu_time, (model_lits if status == "sat" else None)
+    return status, wall_time, cpu_time, (model_lits if status == "sat" else None), winner
 
 
 def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
@@ -686,6 +692,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     Chạy trong process pool (executor). Trả về:
     (idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, centers)
     """
+    winner = None
     pid = os.getpid()
     print(
         f"[WORKER-START] pid={pid} idx={idx} R={radius} "
@@ -713,7 +720,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 f"-> UNSAT(by reduction)",
                 flush=True
             )
-            return idx, radius, "unsat", 0.0, 0.0, None, None, None
+            return idx, radius, "unsat", 0.0, 0.0, None, None, None, None
 
         if solver_name in EXTERNAL_SOLVERS:
             # cancel_ev lấy từ shared dict
@@ -724,7 +731,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             except Exception:
                 cancel_ev = None
 
-            status, wall_sec, cpu_sec, model = _run_external_solver(
+            status, wall_sec, cpu_sec, model, winner = _run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
@@ -740,7 +747,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     f"-> {status.upper()} wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                     flush=True
                 )
-                return idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, None
+                return idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, None, winner
 
             if status == "unsat":
                 print(
@@ -748,7 +755,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     f"-> UNSAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                     flush=True
                 )
-                return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None
+                return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None, winner
 
             # SAT
             model_set = set(model or [])
@@ -766,7 +773,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 f"-> SAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s centers={centers}",
                 flush=True
             )
-            return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers
+            return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers, winner
         
         with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
             cancel_ev = None
@@ -818,14 +825,14 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                         f"-> TIMEOUT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return (idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None)
+                    return idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None, winner
                 if not sat:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
                         f"-> UNSAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return (idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None)
+                    return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None, winner
 
                 model = solver.get_model() or []
                 if not model:
@@ -834,7 +841,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                         f"-> TIMEOUT(no model) wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return (idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None)
+                    return idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None, winner
 
                 model_set = set(model)
                 y_vars = varmap.get("y", [])
@@ -847,7 +854,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     f"-> SAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s centers={centers}",
                     flush=True
                 )
-                return (idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers)
+                return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers, winner
             finally:
                 if timer:
                     timer.cancel()
@@ -859,7 +866,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             file=sys.stderr,
             flush=True
         )
-        return idx, radius, "error", 0.0, 0.0, None, None, None
+        return idx, radius, "error", 0.0, 0.0, None, None, None, None
 
 
 # ---------------- CLI & Runner ----------------
@@ -902,13 +909,6 @@ def parse_args():
         default="results.csv",
         help="CSV output path",
     )
-    ap.add_argument(
-        "--strategy",
-        type=str,
-        choices=["parallel"],
-        default="parallel",
-        help="Radius search strategy (paper compares parallel only)",
-    )
     return ap.parse_args()
 
 
@@ -918,7 +918,6 @@ def run_experiment(
     solvers,
     time_limit,
     radii_workers,
-    strategy,
     *,
     mgr,
     cancel_dict
@@ -940,7 +939,7 @@ def run_experiment(
                     f"encoding={encoding} solver={solver_name}",
                     flush=True
                 )
-                status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu, best_sat_wall = search_min_radius_parallel(
+                status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu, best_sat_wall, winner = search_min_radius_parallel(
                     inst,
                     encoding,
                     solver_name,
@@ -974,6 +973,7 @@ def run_experiment(
                         "nvars": nvars,
                         "nclauses": nclauses,
                         "centers": json.dumps(centers if centers is not None else []),
+                        "winner": winner,
                     }
                 )
 
@@ -1266,24 +1266,27 @@ def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wal
 
     return wins
 
-def print_painless_wins(all_results, metric="cpu", tie_break="wall"):
-    wins = list_instances_where_painless_wins(all_results, metric=metric, tie_break=tie_break)
+def print_painless_internal_winners(all_results):
+    rows = [
+        r for r in all_results
+        if r.get("solver") == "painless"
+        and r.get("status") == "OK"
+        and r.get("best_radius") is not None
+    ]
 
-    print(f"\n=== Painless wins by {metric} (tie-break {tie_break}) ===")
-    if not wins:
-        print("No instance where painless is the winner.")
+    if not rows:
+        print("\nNo painless OK results.")
         return
 
-    for w in wins:
-        t = w.get(metric)
-        tb = w.get(tie_break)
+    print("\n=== Painless internal winners at BEST radius (from -c=8) ===")
+    # sort để in ổn định
+    rows.sort(key=lambda r: (r["instance"], r.get("encoding", ""), r["best_radius"]))
+
+    for r in rows:
         print(
-            f"instance={w['instance']} n={w['n']} p={w['p']} "
-            f"R*={w['radius']} enc={w['encoding']} "
-            f"{metric}={t:.6f} {tie_break}={tb:.6f}"
+            f"instance={r['instance']} enc={r.get('encoding')} "
+            f"R*={r['best_radius']} winner={r.get('winner')}"
         )
-
-
 
 
 if __name__ == "__main__":
@@ -1312,7 +1315,6 @@ if __name__ == "__main__":
                 args.solvers,
                 args.time_limit,
                 args.radii_workers,
-                args.strategy,
                 mgr=MGR,
                 cancel_dict=CANCEL,
             )
@@ -1327,5 +1329,5 @@ if __name__ == "__main__":
 
     if all_results:
         write_paper_table(all_results, args.out)
-        print_painless_wins(all_results, metric="cpu", tie_break="wall")
+        print_painless_internal_winners(all_results)
 
