@@ -11,6 +11,7 @@ from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from encoder import PCenterSAT
 from pysat.solvers import Solver
+from kissat import Solver
 import multiprocessing as mp
 from collections import defaultdict
 import statistics as _stats
@@ -48,8 +49,8 @@ EXTERNAL_SOLVERS = {
     "painless": (
         os.path.join(BASE_DIR, "solvers", "painless", "build", "release", "painless_release"),
         [
-            "-c=8",
-            "-solver=kclgmMyt"
+            "-c=2",
+            "-solver=kM"
         ]
     )
 }
@@ -722,6 +723,71 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 flush=True
             )
             return idx, radius, "unsat", 0.0, 0.0, None, None, None, None
+	
+        if solver_name == "kissat":
+            cancel_ev = None
+            try:
+                if _CANCEL_SHARED is not None:
+                    cancel_ev = _CANCEL_SHARED.get(idx)
+            except Exception:
+                cancel_ev = None
+
+            t0 = time.perf_counter()
+            cpu0 = _cpu_self_seconds()
+
+            ks = Solver()
+            for cl in cnf.clauses:
+                ks.add_clause(cl)
+
+            sat = None
+
+            if cancel_ev is not None:
+                def _watch_cancel():
+                    cancel_ev.wait()
+                    try:
+                        ks.terminate()
+                    except Exception:
+                        pass
+                threading.Thread(target=_watch_cancel, daemon=True).start()
+
+            try:
+                if time_limit and time_limit > 0:
+                    sat = ks.solve_limited(time_limit)
+                else:
+                    sat = ks.solve()
+            except Exception:
+                sat = None
+
+            cpu1 = _cpu_self_seconds()
+            t1 = time.perf_counter()
+
+            wall_sec = t1 - t0
+            cpu_sec = cpu1 - cpu0
+
+            nvars = cnf.nv
+            nclauses = len(cnf.clauses)
+
+            if sat is None:
+                return idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None, None
+
+            if not sat:
+                return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None, None
+
+            model = ks.get_model()
+            model_set = set(model or [])
+
+            y_vars = varmap.get("y", [])
+            Nc = set(varmap.get("Nc", []))
+            candidates = set(varmap.get("candidates", []))
+
+            chosen = {
+                j
+                for j, v in enumerate(y_vars)
+                if (v in model_set) and (j in candidates)
+            }
+            centers = sorted(chosen | Nc)
+
+            return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers, "kissat"
 
         if solver_name in EXTERNAL_SOLVERS:
             # cancel_ev lấy từ shared dict
@@ -889,7 +955,7 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "painless"],
+        default=["maplecm", "maplechrono", "sparrow2riss", "painless", "glucose4", "kissat"],
         help="SAT solvers to use",
     )
     ap.add_argument(
