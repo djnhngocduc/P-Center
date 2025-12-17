@@ -261,6 +261,8 @@ def search_min_radius_parallel(
     sat_cpu_time = {}
     sat_wall_time = {}
     sat_winner = {}
+    sat_nvars = {}
+    sat_nclauses = {}
 
     i = seed_idx if (seed_idx is not None and 0 <= seed_idx < nR) else 0
     best_sat_idx = None
@@ -345,19 +347,14 @@ def search_min_radius_parallel(
 
                 decided[idx] = status
 
-                if nvars is not None and nclauses is not None:
-                    best_nvars = nvars if best_nvars is None else min(best_nvars, nvars)
-                    best_nclauses = (
-                        nclauses
-                        if best_nclauses is None
-                        else min(best_nclauses, nclauses)
-                    )
-
                 if status == "sat":
                     sat_solutions[idx] = centers
                     sat_cpu_time[idx] = cpu_sec
                     sat_wall_time[idx] = wall_sec
                     sat_winner[idx] = winner
+
+                    sat_nvars[idx] = nvars
+                    sat_nclauses[idx] = nclauses
 
                     if (best_sat_in_batch is None) or (idx > best_sat_in_batch):
                         best_sat_in_batch = idx
@@ -420,15 +417,6 @@ def search_min_radius_parallel(
                     )
 
                     decided[nxt] = status2
-                    if nv2 is not None and nc2 is not None:
-                        best_nvars = (
-                            nv2 if best_nvars is None else min(best_nvars, nv2)
-                        )
-                        best_nclauses = (
-                            nc2
-                            if best_nclauses is None
-                            else min(best_nclauses, nc2)
-                        )
 
                     if status2 == "unsat":
                         best_sat_idx = k
@@ -438,6 +426,9 @@ def search_min_radius_parallel(
                         sat_cpu_time[nxt] = cpu_sec2
                         sat_wall_time[nxt] = wall_sec2
                         sat_winner[nxt] = winner2
+
+                        sat_nvars[nxt] = nv2
+                        sat_nclauses[nxt] = nc2
 
                         if cancel_dict is not None:
                             for kk in range(0, nxt):
@@ -488,6 +479,8 @@ def search_min_radius_parallel(
         flush=True
     )
 
+    best_nvars = sat_nvars.get(best_sat_idx, None)
+    best_nclauses = sat_nclauses.get(best_sat_idx, None)
     best_winner = sat_winner.get(best_sat_idx, None)
 
     return (
@@ -1046,6 +1039,7 @@ def write_paper_table(all_results, out_csv_path: str):
     cfg_runs = defaultdict(list)
     all_instances = set()
     methods_seen = set()
+    sizes_at_global = {}
 
     for r in all_results:
         inst = r["instance"]
@@ -1085,6 +1079,9 @@ def write_paper_table(all_results, out_csv_path: str):
                 continue
             if x.get("best_radius") != gR:
                 continue
+            key_size = (inst, n, p, enc)
+            if key_size not in sizes_at_global:
+                sizes_at_global[key_size] = x.get("nvars"), x.get("nclauses")
             
             cpu_v = x.get("cpu")
             wall_v = x.get("wall")
@@ -1100,8 +1097,13 @@ def write_paper_table(all_results, out_csv_path: str):
         return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(methods_seen, key=sort_key)
-
+    encodings_only = sorted({enc for (enc, _) in methods_seen})
     header = ["Instance", "n", "p", "radius"]
+
+    for enc in encodings_only:
+        header.append(f"{enc} #vars")
+        header.append(f"{enc} #clauses")
+
     for (enc, sol) in method_cols:
         m = method_label(solver=sol, enc=enc)
         header.append(col_wall(m))
@@ -1122,6 +1124,11 @@ def write_paper_table(all_results, out_csv_path: str):
             "p": p,
             "radius": gR if gR is not None else "-",
         }
+
+        for enc in encodings_only:
+            nv, nc = sizes_at_global.get((inst, n, p, enc), ("-", "-"))
+            row[f"{enc} #vars"] = nv
+            row[f"{enc} #clauses"] = nc
 
         for (enc, sol) in method_cols:
             m = method_label(solver=sol, enc=enc)
