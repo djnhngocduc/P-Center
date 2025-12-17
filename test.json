@@ -2,24 +2,6 @@
   {
     "name": "u1060",
     "tsplib": "dataset/TSPLIB/u1060.tsp",
-    "p": 120,
-    "seed_radius": 510.2706703309522
-  },
-  {
-    "name": "u1060",
-    "tsplib": "dataset/TSPLIB/u1060.tsp",
-    "p": 130,
-    "seed_radius": 499.64999999999964
-  },
-  {
-    "name": "u1060",
-    "tsplib": "dataset/TSPLIB/u1060.tsp",
-    "p": 140,
-    "seed_radius": 452.4622773226507
-  },
-  {
-    "name": "u1060",
-    "tsplib": "dataset/TSPLIB/u1060.tsp",
     "p": 150,
     "seed_radius": 447.00792878874023
   }
