@@ -480,8 +480,8 @@ class PCenterSAT:
         # độ dài hàng i: min(k, i+1)
         # chỉ tạo cho i = 0 .. n-1
         R = []
-        for i in range(1, n):
-            row_len = min(i, k)
+        for i in range(n - 1):
+            row_len = min(i + 1, k)
             row = [new_var() for _ in range(row_len)]
             R.append(row)
 
@@ -493,7 +493,7 @@ class PCenterSAT:
         for i in range(2, n):
             prev = R[i-2]
             curr = R[i-1]
-            for j in range(min(len(prev), len(curr))):
+            for j in range(len(prev)):
                 cnf.append([-prev[j], curr[j]])
 
         # --- (3) (X_i ∧ R_{i-1,j-1}) -> R_{i,j}
