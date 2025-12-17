@@ -851,8 +851,8 @@ def parse_args():
     ap.add_argument(
         "--encodings",
         nargs="+",
-        default=["pysat_sc", "pypb_adder", "nsc", "pb_bdd"],
-        help="Encodings to test: pysat_sc pypb_adder nsc pb_bdd",
+        default=["pysat_sc", "pypb_bdd", "nsc", "pb_bdd"],
+        help="Encodings to test: pysat_sc pypb_bdd nsc pb_bdd",
     )
     ap.add_argument(
         "--solvers",
