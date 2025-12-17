@@ -23,13 +23,12 @@ import re
 _WIN_RE = re.compile(r"The winner is\s+([A-Za-z0-9_+\-]+)\(")
 
 def _extract_painless_winner(stdout: str) -> str | None:
-    # Painless thường in log dạng "c ... The winner is kissat(..."
     winner = None
     for line in stdout.splitlines():
         if "The winner is" in line:
             m = _WIN_RE.search(line)
             if m:
-                winner = m.group(1)  # ví dụ: "kissat", "glucose", ...
+                winner = m.group(1) 
     return winner
 
 _CANCEL_SHARED = None
@@ -88,7 +87,6 @@ def _pool_initializer(cancel_proxy, inst):
 
 
 # ---------------- IO helpers ----------------
-
 def load_instance_data(inst_file: str):
     with open(inst_file, "r", encoding="utf-8", errors="ignore") as f:
         return json.load(f)
@@ -193,7 +191,6 @@ def load_orlib_edge_list(path: str):
             parts = line.strip().split()
             if len(parts) < 3:
                 continue
-            # Giảm chỉ số từ 1 xuống 0
             u, v, w = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2])
             edges.append((u, v, w))
 
@@ -251,10 +248,6 @@ def search_min_radius_parallel(
     mgr=None,
     cancel_dict=None
 ):
-    """
-    Dùng pool cố định (ProcessPoolExecutor) với max_workers = radii_workers.
-    Ngắt mềm job bán kính lớn hơn bằng Event + solver.interrupt().
-    """
     radii = inst.radii
     nR = len(radii)
     start_wall = time.time()
@@ -269,7 +262,6 @@ def search_min_radius_parallel(
     sat_wall_time = {}
     sat_winner = {}
 
-    # seed mặc định = 0 (bán kính lớn nhất)
     i = seed_idx if (seed_idx is not None and 0 <= seed_idx < nR) else 0
     best_sat_idx = None
 
@@ -279,15 +271,13 @@ def search_min_radius_parallel(
         flush=True
     )
 
-    # helper: tạo Event cho một idx nếu chưa có
     def ensure_event(idx):
         if cancel_dict is not None:
             if idx not in cancel_dict:
-                cancel_dict[idx] = mgr.Event()  # Event proxy
+                cancel_dict[idx] = mgr.Event()
             return cancel_dict[idx]
         return None
 
-    # submit batch lên pool
     def launch_batch(ex, idxs):
         futs = {}
         print(
@@ -368,9 +358,10 @@ def search_min_radius_parallel(
                     sat_cpu_time[idx] = cpu_sec
                     sat_wall_time[idx] = wall_sec
                     sat_winner[idx] = winner
+
                     if (best_sat_in_batch is None) or (idx > best_sat_in_batch):
                         best_sat_in_batch = idx
-                    # NGẮT MỀM mọi job có idx < idx_sat (bán kính lớn hơn)
+
                     if cancel_dict is not None:
                         for kk in need:
                             if kk < best_sat_in_batch:
@@ -384,7 +375,6 @@ def search_min_radius_parallel(
                                 except Exception:
                                     pass
 
-            # Co dần nếu có SAT trong batch
             if best_sat_in_batch is not None:
                 k = best_sat_in_batch
                 print(
@@ -407,10 +397,8 @@ def search_min_radius_parallel(
                         else:
                             break
 
-                    # chạy đơn lẻ bán kính tiếp theo
                     ensure_event(nxt)
                     futs2 = launch_batch(ex, [nxt])
-                    # không cần as_completed loop phức tạp vì chỉ 1 future
                     fut2 = next(iter(futs2.keys()))
                     try:
                         idx2, R2, status2, wall_sec2, cpu_sec2, nv2, nc2, centers2, winner2 = fut2.result()
@@ -450,7 +438,7 @@ def search_min_radius_parallel(
                         sat_cpu_time[nxt] = cpu_sec2
                         sat_wall_time[nxt] = wall_sec2
                         sat_winner[nxt] = winner2
-                        # NGẮT MỀM mọi job có idx < nxt
+
                         if cancel_dict is not None:
                             for kk in range(0, nxt):
                                 if kk in cancel_dict:
@@ -466,7 +454,6 @@ def search_min_radius_parallel(
                         k = nxt
                         continue
                     else:
-                        # timeout -> dừng co để tránh vòng vô hạn
                         break
 
                 if best_sat_idx is not None:
@@ -532,14 +519,6 @@ def _write_dimacs(cnf, path):
 
 
 def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
-    """
-    Chạy solver ngoài (Maple_CM, MapleLCMDistChronoBT, Sparrow2Riss-2018).
-    Trả về: (status, solver_time, model_lits | None)
-
-    status: "sat" | "unsat" | "timeout" | "error"
-    solver_time: thời gian CPU xấp xỉ (wall-clock tính trong Python)
-    model_lits: list[int] model (các literal) nếu SAT, ngược lại None
-    """
     global _LOCAL_TMPDIR
 
     bin_path, extra_args = EXTERNAL_SOLVERS[solver_name]
@@ -693,10 +672,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
 
 def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
-    """
-    Chạy trong process pool (executor). Trả về:
-    (idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, centers)
-    """
     winner = None
     pid = os.getpid()
     print(
@@ -728,7 +703,6 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             return idx, radius, "unsat", 0.0, 0.0, None, None, None, None
 
         if solver_name in EXTERNAL_SOLVERS:
-            # cancel_ev lấy từ shared dict
             cancel_ev = None
             try:
                 if _CANCEL_SHARED is not None:
@@ -762,7 +736,6 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 )
                 return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None, winner
 
-            # SAT
             model_set = set(model or [])
             y_vars = varmap.get("y", [])
             Nc = set(varmap.get("Nc", []))
@@ -798,7 +771,6 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                         pass
                 watcher = threading.Thread(target=_watch, daemon=True)
                 watcher.start()
-            # ------------------------------------------------------------
 
             timer = None
             try:
@@ -864,7 +836,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 if timer:
                     timer.cancel()
 
-    except Exception as e:
+    except Exception:
         tb = traceback.format_exc()
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius}\n{tb}",
@@ -874,8 +846,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
         return idx, radius, "error", 0.0, 0.0, None, None, None, None
 
 
-# ---------------- CLI & Runner ----------------
-
+# CLI & Runner
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -988,8 +959,7 @@ def run_experiment(
 
 
 def print_instance_summary_for_console(all_results_for_inst):
-    # Gom theo cấu hình
-    cfg_runs = defaultdict(list)  # (enc,sol) -> [rows]
+    cfg_runs = defaultdict(list)
     inst_name = None
     n = None
     p = None
@@ -1000,7 +970,6 @@ def print_instance_summary_for_console(all_results_for_inst):
         p = r["p"]
         cfg_runs[(r["encoding"], r["solver"])].append(r)
 
-    # bestR của từng method
     cfg_bestR = {}
     for key, runs in cfg_runs.items():
         brs = [x["best_radius"] for x in runs if x.get("best_radius") is not None]
@@ -1074,8 +1043,7 @@ def write_paper_table(all_results, out_csv_path: str):
     def col_wall(method: str) -> str:
         return f"{method} wall"
 
-    # Gom per-run theo cấu hình
-    cfg_runs = defaultdict(list)  # (inst,n,p,enc,sol) -> [rows]
+    cfg_runs = defaultdict(list)
     all_instances = set()
     methods_seen = set()
 
@@ -1095,21 +1063,17 @@ def write_paper_table(all_results, out_csv_path: str):
         key = (inst, n, p, enc, sol)
         cfg_runs[key].append(r)
 
-    # Với từng cấu hình: bestR_cfg = min(best_radius)
-    cfg_bestR = {}  # (inst,n,p,enc,sol) -> bestR_cfg
+    cfg_bestR = {}
     for key, runs in cfg_runs.items():
         brs = [x["best_radius"] for x in runs if x.get("best_radius") is not None]
         if brs:
             cfg_bestR[key] = min(brs)
 
-    # global_bestR[(inst,n,p)] = bán kính nhỏ nhất giữa mọi method
     global_bestR = {}
     for (inst, n, p, enc, sol), R in cfg_bestR.items():
         if (inst, n, p) not in global_bestR or R < global_bestR[(inst, n, p)]:
             global_bestR[(inst, n, p)] = R
 
-    # Thời gian theo method tại đúng global_bestR
-    # key: (inst,n,p,enc,sol) -> list times khi run đạt global_bestR
     walls_at_global = defaultdict(list)
     cpus_at_global = defaultdict(list)
     for (inst, n, p, enc, sol), runs in cfg_runs.items():
@@ -1137,7 +1101,6 @@ def write_paper_table(all_results, out_csv_path: str):
 
     method_cols = sorted(methods_seen, key=sort_key)
 
-    # Header CSV
     header = ["Instance", "n", "p", "radius"]
     for (enc, sol) in method_cols:
         m = method_label(solver=sol, enc=enc)
@@ -1145,11 +1108,10 @@ def write_paper_table(all_results, out_csv_path: str):
         header.append(col_cpu(m))
 
     rows = []
-    # để tính footer Num./Avg. cho từng cột
+
     solved_wall = {col_wall(method_label(sol, enc)): [] for (enc, sol) in method_cols}
     solved_cpu = {col_cpu(method_label(sol, enc)): [] for (enc, sol) in method_cols}
 
-    # Với mỗi instance (inst,n,p) -> đúng 1 dòng
     for (inst, n, p) in sorted(
         all_instances, key=lambda x: (str(x[0]), x[1], x[2])
     ):
@@ -1185,7 +1147,6 @@ def write_paper_table(all_results, out_csv_path: str):
 
         rows.append(row)
 
-    # Footer Num. và Avg.
     footer_num = {"Instance": "Num.", "n": "", "p": "", "radius": ""}
     footer_avg = {"Instance": "Avg.", "n": "", "p": "", "radius": ""}
 
@@ -1206,7 +1167,6 @@ def write_paper_table(all_results, out_csv_path: str):
     rows.append(footer_num)
     rows.append(footer_avg)
 
-    # Ghi CSV
     with open(out_csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=header)
         w.writeheader()
@@ -1214,11 +1174,6 @@ def write_paper_table(all_results, out_csv_path: str):
             w.writerow(r)
 
 def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wall"):
-    """
-    Trả về list các dòng thắng của Painless theo từng instance.
-    metric: "cpu" | "wall" | "time_sec"
-    tie_break: dùng khi hoà
-    """
     by_inst = defaultdict(list)
     for r in all_results:
         by_inst[(r["instance"], r["n"], r["p"])].append(r)
@@ -1231,7 +1186,6 @@ def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wal
             continue
         gR = min(feas)
 
-        # candidates đạt đúng global best radius
         cand = [
             x for x in rows
             if x.get("status") == "OK"
@@ -1241,7 +1195,6 @@ def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wal
         if not cand:
             continue
 
-        # best per solver (min qua encodings)
         best_by_solver = {}
         for x in cand:
             sol = x["solver"]
@@ -1254,7 +1207,7 @@ def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wal
         best_list = []
         for sol, v in best_by_solver.items():
             best_list.append((v["key"], sol, v["row"]))
-        best_list.sort(key=lambda z: (z[0][0], z[0][1], z[1]))  # metric, tie_break, solvername
+        best_list.sort(key=lambda z: (z[0][0], z[0][1], z[1]))
 
         _, winner_solver, winner_row = best_list[0]
         if winner_solver == "painless":
@@ -1284,7 +1237,6 @@ def print_painless_internal_winners(all_results):
         return
 
     print("\n=== Painless internal winners at BEST radius (from -c=8) ===")
-    # sort để in ổn định
     rows.sort(key=lambda r: (r["instance"], r.get("encoding", ""), r["best_radius"]))
 
     for r in rows:
@@ -1302,7 +1254,6 @@ if __name__ == "__main__":
     args = parse_args()
     instance_data = load_instance_data(args.instances)
 
-    # Chuẩn hoá đường dẫn tương đối theo vị trí instances.json
     base_dir = os.path.dirname(os.path.abspath(args.instances))
     for d in instance_data:
         if "orlib" in d and not os.path.isabs(d["orlib"]):
