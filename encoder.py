@@ -480,42 +480,43 @@ class PCenterSAT:
         # độ dài hàng i: min(k, i+1)
         # chỉ tạo cho i = 0 .. n-1
         R = []
-        for i in range(n):
-            row_len = min(k, i + 1)
+        for i in range(1, n):
+            row_len = min(i, k)
             row = [new_var() for _ in range(row_len)]
             R.append(row)
 
         # --- (1) X_i -> R_{i,1}  ===  (¬X_i ∨ R_{i,0})
-        for i in range(n):
-            if len(R[i]) >= 1:
-                cnf.append([-lits[i], R[i][0]])
+        for i in range(1, n):
+            cnf.append([-lits[i-1], R[i-1][0]])
 
         # --- (2) R_{i-1,j} -> R_{i,j}  ===  (¬R_{i-1,j} ∨ R_{i,j})
-        for i in range(1, n):
-            lim = min(len(R[i - 1]), len(R[i]))
-            for j in range(lim):
-                cnf.append([-R[i - 1][j], R[i][j]])
+        for i in range(2, n):
+            prev = R[i-2]
+            curr = R[i-1]
+            for j in range(min(len(prev), len(curr))):
+                cnf.append([-prev[j], curr[j]])
 
         # --- (3) (X_i ∧ R_{i-1,j-1}) -> R_{i,j}
         # === (¬X_i ∨ ¬R_{i-1,j-1} ∨ R_{i,j})
-        for i in range(1, n):
-            for j in range(1, len(R[i])):
-                if j - 1 < len(R[i - 1]):
-                    cnf.append([
-                        -lits[i],
-                        -R[i - 1][j - 1],
-                        R[i][j]
-                    ])
-
-        # --- (8) X_i -> ¬R_{i-1,k} === (¬X_i ∨ ¬R_{i-1,k-1})
-        for i in range(k, n):
-            if (k - 1) < len(R[i - 1]):
+        for i in range(2, n):
+            prev = R[i-2]
+            curr = R[i-1]
+            for j in range(1, len(curr)):
                 cnf.append([
-                    -lits[i],
-                    -R[i - 1][k - 1]
+                    -lits[i-1],
+                    -prev[j-1],
+                    curr[j]
                 ])
 
-        cnf.nv = max(getattr(cnf, "nv", 0), next_var - 1)
+
+        # --- (8) X_i -> ¬R_{i-1,k} === (¬X_i ∨ ¬R_{i-1,k-1})
+        for i in range(k + 1, n + 1):
+            cnf.append([
+                -lits[i-1],
+                -R[i-2][k-1]
+            ])
+
+        cnf.nv = max(cnf.nv, next_var - 1)
 
     def _encode_atmost_pb2cnf(self, cnf, lits, bound, top_id_start):
         lits = [int(x) for x in lits]
