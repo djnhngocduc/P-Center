@@ -1,50 +1,62 @@
 [
-{
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 10,
-    "seed_radius": 457.90501198392633
+  {
+    "name": "pmed01",
+    "orlib": "dataset/OR-Lib/pmed1.txt",
+    "seed_radius": 127
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp", 
-    "p": 20,
-    "seed_radius": 309.0142004827609
+    "name": "pmed02",
+    "orlib": "dataset/OR-Lib/pmed2.txt",
+    "seed_radius": 98
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 30,
-    "seed_radius": 240.98769366919947
+    "name": "pmed03",
+    "orlib": "dataset/OR-Lib/pmed3.txt",
+    "seed_radius": 93
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 40,
-    "seed_radius": 209.44891596759317
+    "name": "pmed04",
+    "orlib": "dataset/OR-Lib/pmed4.txt",
+    "seed_radius": 74
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 50,
-    "seed_radius": 184.90517596865686
+    "name": "pmed05",
+    "orlib": "dataset/OR-Lib/pmed5.txt",
+    "seed_radius": 48
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 60,
-    "seed_radius": 162.63779450054
+    "name": "pmed06",
+    "orlib": "dataset/OR-Lib/pmed6.txt",
+    "seed_radius": 84
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 70,
-    "seed_radius": 148.10960873623262
+    "name": "pmed07",
+    "orlib": "dataset/OR-Lib/pmed7.txt",
+    "seed_radius": 64
   },
   {
-    "name": "u1817",
-    "tsplib": "dataset/TSPLIB/u1817.tsp",
-    "p": 80,
-    "seed_radius": 136.77390138473027
+    "name": "pmed08",
+    "orlib": "dataset/OR-Lib/pmed8.txt",
+    "seed_radius": 55
+  },
+  {
+    "name": "pmed09",
+    "orlib": "dataset/OR-Lib/pmed9.txt",
+    "seed_radius": 37
+  },
+  {
+    "name": "pmed10",
+    "orlib": "dataset/OR-Lib/pmed10.txt",
+    "seed_radius": 20
+  },
+  {
+    "name": "pmed11",
+    "orlib": "dataset/OR-Lib/pmed11.txt",
+    "seed_radius": 59
+  },
+  {
+    "name": "pmed12",
+    "orlib": "dataset/OR-Lib/pmed12.txt",
+    "seed_radius": 51
   }
 ]
