@@ -8,6 +8,12 @@
   {
     "name": "u1817",
     "tsplib": "dataset/TSPLIB/u1817.tsp",
+    "p": 40,
+    "seed_radius": 209.44891596759317
+  },
+  {
+    "name": "u1817",
+    "tsplib": "dataset/TSPLIB/u1817.tsp",
     "p": 50,
     "seed_radius": 184.90517596865686
   },
