@@ -12,10 +12,14 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
+from sb_lexleader_gp import SymmetryBreaker as GPSymmetryBreaker
+# from sb_lexleader_cs import SymmetryBreaker as CSSymmetryBreaker
 
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
 
+_SB = GPSymmetryBreaker()
+# _SB = CSSymmetryBreaker(canonizing_perms_path="canonizing_perms.json")
 
 class PCenterSAT:
     def __init__(self, dist: List[List[float]], p: int):
@@ -395,15 +399,43 @@ class PCenterSAT:
                     return True
             return False
 
+        uncovered_demands: List[int] = []
+        eps = 1e-12
+
         for u in demands:
             if covered_by_Nc(u):
                 continue
-            allowed = [self._y(c) for c in Npp if self.dist[c][u] <= radius + 1e-12]
+            uncovered_demands.append(u)
+
+            allowed = [self._y(c) for c in Npp if self.dist[c][u] <= radius + eps]
             if not allowed:  
                 return None, {}
             cnf.append(allowed)
 
         candidates = sorted(list(Npp))
+
+        cover = {}
+        for u in uncovered_demands:
+            cover[u] = [c for c in candidates if self.dist[c][u] <= radius + eps]
+
+        # 2) chuẩn bị top_id
+        y_vars_ordered = [self._y(c) for c in candidates]
+        top_id = max(getattr(cnf, "nv", 0), max(y_vars_ordered, default=0))
+
+        # 3) add SB (LexLeader on automorphism generators)
+        # max_gens bạn có thể để 32/64/128 tuỳ instance
+        if _SB.available and candidates and uncovered_demands:
+            top_id = _SB.add_sb(
+                cnf,
+                y_vars_ordered=y_vars_ordered,
+                cover=cover,
+                uncovered_demands=uncovered_demands,
+                candidates=candidates,
+                top_id=top_id,
+                max_gens=64,
+            )
+            cnf.nv = max(getattr(cnf, "nv", 0), top_id)
+
         bound = self.p - len(Nc)
         if bound < 0:
             if DEBUG_REDUCTION:
