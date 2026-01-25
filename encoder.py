@@ -12,14 +12,12 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb_lexleader_gp import SymmetryBreaker as GPSymmetryBreaker
-# from sb_lexleader_cs import SymmetryBreaker as CSSymmetryBreaker
+from symmetry_breaking_oec import OrbitEquivSB
 
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
 
-_SB = GPSymmetryBreaker()
-# _SB = CSSymmetryBreaker(canonizing_perms_path="canonizing_perms.json")
+_OEC_SB = OrbitEquivSB(debug=False)
 
 class PCenterSAT:
     def __init__(self, dist: List[List[float]], p: int):
@@ -371,19 +369,52 @@ class PCenterSAT:
         self._rule2(neighbours, at_least_pairs, Nc, Nd)
         self._addition_rule(neighbours, at_least_pairs, Nc, Nd)
 
-        cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
+        # cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
 
         enabled_centers = set(range(self.n))
         demands = list(range(self.n))
-        return Nc, Nd, enabled_centers, demands, cnf_extra
+        # return Nc, Nd, enabled_centers, demands, cnf_extra
+        return Nc, Nd, enabled_centers, demands, at_least_pairs
 
     def _encode_cnf(self, radius: float, encoding: str):
         cnf = CNF()
 
-        Nc, Nd, enabled_centers, demands, cnf_extra = self.compute_reduction(radius)
+        # Nc, Nd, enabled_centers, demands, cnf_extra = self.compute_reduction(radius)
 
-        for clause in cnf_extra:
-            cnf.append(clause)
+        # for clause in cnf_extra:
+        #     cnf.append(clause)
+        
+        Nc, Nd, enabled_centers, demands, at_least_pairs = self.compute_reduction(radius)
+
+        extra_pairs = []
+        extra_units_true = set()
+
+        for (a, b) in at_least_pairs:
+            # nếu clause đã được thỏa do Nc
+            if a in Nc or b in Nc:
+                continue
+
+            a_del = (a in Nd)
+            b_del = (b in Nd)
+
+            if a_del and b_del:
+                # (a v b) nhưng cả 2 bị ép False => UNSAT ngay
+                return None, {}
+
+            if a_del and (not b_del):
+                extra_units_true.add(b)
+                continue
+            if b_del and (not a_del):
+                extra_units_true.add(a)
+                continue
+
+            # cả hai chưa fix
+            extra_pairs.append((a, b))
+
+        for (a, b) in extra_pairs:
+            cnf.append([self._y(a), self._y(b)])
+        for u in sorted(extra_units_true):
+            cnf.append([self._y(u)])
 
         for c in Nc:
             cnf.append([self._y(c)])
@@ -417,24 +448,44 @@ class PCenterSAT:
         cover = {}
         for u in uncovered_demands:
             cover[u] = [c for c in candidates if self.dist[c][u] <= radius + eps]
+        
+        cand_set = set(candidates)
+
+        sb_extra_pairs = [(a, b) for (a, b) in extra_pairs if (a in cand_set and b in cand_set)]
+        sb_units_true = [u for u in extra_units_true if u in cand_set]
+
+        cnf.nv = max(getattr(cnf, "nv", 0), self._y(self.n - 1) if self.n > 0 else 0)
+
+
+        if candidates:
+            sb_stats = _OEC_SB.add_sb(
+                cnf,
+                candidates=candidates,
+                cover=cover,
+                y_func=self._y,
+                extra_pairs=sb_extra_pairs,
+                unit_true=sb_units_true,
+                min_class_size=2,
+                exclude_unit_true=True,
+            )
+
+            # --- SB statistics log ---
+            print(
+                f"[SB] R={radius} "
+                f"enabled={sb_stats.enabled} "
+                f"cand_in={sb_stats.n_candidates_in} used={sb_stats.n_candidates_used} "
+                f"classes={sb_stats.n_classes} ge2={sb_stats.n_classes_ge2} "
+                f"max_class={sb_stats.max_class_size} "
+                f"sb_clauses={sb_stats.sb_clauses_added} "
+                f"uncovered={len(uncovered_demands)} "
+                f"extra_pairs={len(sb_extra_pairs)} unit_true={len(sb_units_true)}",
+                flush=True,
+            )
+
 
         # 2) chuẩn bị top_id
         y_vars_ordered = [self._y(c) for c in candidates]
         top_id = max(getattr(cnf, "nv", 0), max(y_vars_ordered, default=0))
-
-        # 3) add SB (LexLeader on automorphism generators)
-        # max_gens bạn có thể để 32/64/128 tuỳ instance
-        if _SB.available and candidates and uncovered_demands:
-            top_id = _SB.add_sb(
-                cnf,
-                y_vars_ordered=y_vars_ordered,
-                cover=cover,
-                uncovered_demands=uncovered_demands,
-                candidates=candidates,
-                top_id=top_id,
-                max_gens=64,
-            )
-            cnf.nv = max(getattr(cnf, "nv", 0), top_id)
 
         bound = self.p - len(Nc)
         if bound < 0:
