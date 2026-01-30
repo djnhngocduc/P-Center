@@ -1,7 +1,7 @@
 import math
 from typing import List, Tuple, Set
 from threading import RLock
-from collections import deque
+from collections import deque, defaultdict
 from pysat.formula import CNF
 from pysat.card import CardEnc
 from pysat.card import EncType as CardEncType
@@ -12,12 +12,8 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from symmetry_breaking_oec import OrbitEquivSB
-
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
-
-_OEC_SB = OrbitEquivSB(debug=False)
 
 class PCenterSAT:
     def __init__(self, dist: List[List[float]], p: int):
@@ -369,20 +365,91 @@ class PCenterSAT:
         self._rule2(neighbours, at_least_pairs, Nc, Nd)
         self._addition_rule(neighbours, at_least_pairs, Nc, Nd)
 
-        # cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
-
         enabled_centers = set(range(self.n))
         demands = list(range(self.n))
-        # return Nc, Nd, enabled_centers, demands, cnf_extra
+
         return Nc, Nd, enabled_centers, demands, at_least_pairs
+    
+    def _find_symmetry_backbones(self, neighbours: List[List[int]], candidates: List[int], uncovered_demands_set: Set[int], at_least_pairs: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """
+        Tìm các 'Relaxed Backbones': Các đỉnh có tập bao phủ giống hệt nhau
+        ĐỐI VỚI CÁC ĐỈNH CHƯA ĐƯỢC BAO PHỦ (uncovered_demands).
+        
+        Logic: Nếu u và v cùng bao phủ tập {x, y} (nơi x, y chưa ai phủ), 
+        thì dù u, v có khác nhau ở chỗ nào khác (đã được phủ bởi Nc), 
+        chúng vẫn là đối xứng trong ngữ cảnh bài toán con hiện tại.
+        """
+        if not candidates:
+            return []
+        
+        # 1. Xây dựng map: Node -> Các node mà nó bị ràng buộc cùng trong at_least_pairs
+        # Mục đích: Phân biệt các node có ràng buộc khác nhau.
+        pair_constraints = defaultdict(set)
+        for a, b in at_least_pairs:
+            pair_constraints[a].add(b)
+            pair_constraints[b].add(a)
+
+        # Map: Signature -> List[candidates]
+        # Signature là tuple các đỉnh mà candidate bao phủ (chỉ tính trong uncovered_demands)
+        sig_map = defaultdict(list)
+        
+        for u in candidates:     
+            # Lọc: Chỉ giữ lại những đỉnh nằm trong uncovered_demands_set
+            # Thêm logic: Nếu u chưa được phủ, thì u cũng là một demand cần phủ
+            # (Tuy nhiên candidate list thường nằm trong Npp, và Npp có thể chưa được phủ)
+            
+            effective_cover = []
+            if u in uncovered_demands_set:
+                effective_cover.append(u)
+                
+            for v in neighbours[u]:
+                if v in uncovered_demands_set:
+                    effective_cover.append(v)
+            
+            cover_sig = tuple(sorted(effective_cover))
+            
+            # b. Tính constraint signature (Fix lỗi Rule 2 conflict)
+            # Nếu u không nằm trong pair nào, tuple này rỗng -> OK
+            constr_sig = tuple(sorted(list(pair_constraints[u])))
+
+            # c. Combine
+            full_sig = (cover_sig, constr_sig)
+            sig_map[full_sig].append(u)
+            
+        symmetry_pairs = []
+        for sig, group in sig_map.items():
+            if len(group) >= 2:
+                group.sort()
+                # Tạo chuỗi LexLeader: u1 <- u2 <- u3 ...
+                for k in range(len(group) - 1):
+                    symmetry_pairs.append((group[k], group[k+1]))
+                    
+        return symmetry_pairs
+    
+    def _encode_symmetry_breaking(self, cnf, symmetry_pairs: List[Tuple[int, int]]):
+        """
+        Mã hóa các cặp đối xứng thành mệnh đề CNF (LexLeader Constraints).
+        Paper: Breaking Symmetries from a Set-Covering Perspective.
+        
+        Với cặp (u, v) là đối xứng và u < v:
+        Ràng buộc LexLeader yêu cầu vector nghiệm Y <= pi(Y).
+        Với hoán vị (u, v), điều này tương đương việc cấm trường hợp: y_u = 0 VÀ y_v = 1.
+        (Tức là nếu chỉ chọn 1 trong 2, phải ưu tiên chọn u có index nhỏ hơn).
+        
+        Mệnh đề: y_v -> y_u  <=>  (NOT y_v OR y_u)
+        """
+        count = 0
+        for u, v in symmetry_pairs:
+            # u < v về chỉ số.
+            # Constraint: -y(v) v y(u)
+            # Nghĩa là: Nếu v được chọn làm tâm, thì u cũng phải được chọn (hoặc u đã được chọn).
+            # Điều này phá vỡ đối xứng bằng cách ép thứ tự ưu tiên cho u.
+            cnf.append([-self._y(v), self._y(u)])
+            count += 1
+        return count
 
     def _encode_cnf(self, radius: float, encoding: str):
         cnf = CNF()
-
-        # Nc, Nd, enabled_centers, demands, cnf_extra = self.compute_reduction(radius)
-
-        # for clause in cnf_extra:
-        #     cnf.append(clause)
         
         Nc, Nd, enabled_centers, demands, at_least_pairs = self.compute_reduction(radius)
 
@@ -408,21 +475,24 @@ class PCenterSAT:
                 extra_units_true.add(a)
                 continue
 
-            # cả hai chưa fix
             extra_pairs.append((a, b))
 
         for (a, b) in extra_pairs:
             cnf.append([self._y(a), self._y(b)])
         for u in sorted(extra_units_true):
             cnf.append([self._y(u)])
-
         for c in Nc:
             cnf.append([self._y(c)])
-
         for d in Nd:
             cnf.append([-self._y(d)])
 
         Npp = (enabled_centers - Nc) - Nd
+
+        # --- [START] TÍCH HỢP SYMMETRY BREAKING ---
+        # Chỉ tìm đối xứng trên các đỉnh còn lại trong Npp để giảm kích thước bài toán
+        # Ta cần xây dựng lại neighbor list cho Npp dựa trên bán kính hiện tại
+        # Lưu ý: Ta dùng self._build_neighbours(radius) nhưng chỉ quan tâm quan hệ giữa các node trong Npp
+        # Tuy nhiên, để chính xác, hai đỉnh đối xứng phải bao phủ cùng tập DEMANDS.
 
         def covered_by_Nc(u: int) -> bool:
             for c in Nc:
@@ -430,60 +500,57 @@ class PCenterSAT:
                     return True
             return False
 
-        uncovered_demands: List[int] = []
+        uncovered_demands_list: List[int] = []
         eps = 1e-12
 
         for u in demands:
             if covered_by_Nc(u):
                 continue
-            uncovered_demands.append(u)
+            uncovered_demands_list.append(u)
+        
+        full_neighbours = self._build_neighbours(radius)
+        uncovered_set = set(uncovered_demands_list)
+        
+        # -----------------------------------------------------
+        # [NEW] VARIABLE ORDERING (STATIC ORDERING)
+        # Sắp xếp Candidates theo mức độ "hữu dụng" (Score).
+        # Score = Số lượng demands trong uncovered_set mà candidate này phủ được.
+        # Mục đích: Đưa các biến mạnh lên đầu danh sách để SAT solver (thông qua CardEnc) ưu tiên xử lý.
+        # -----------------------------------------------------
+        cand_scores = {}
+        for c in Npp:
+            score = 0
+            # Tính điểm bao phủ: Bản thân + Hàng xóm
+            if c in uncovered_set:
+                score += 1
+            for neigh in full_neighbours[c]:
+                if neigh in uncovered_set:
+                    score += 1
+            cand_scores[c] = score
 
+        # Sort: Ưu tiên Score cao nhất (reverse=True). 
+        # Nếu Score bằng nhau, dùng -c (tức là index nhỏ hơn) làm tie-breaker để ổn định.
+        candidates_list = sorted(list(Npp), key=lambda x: (cand_scores[x], -x), reverse=True)
+
+        # -----------------------------------------------------
+        # SYMMETRY BREAKING
+        # Dùng candidates_list đã sắp xếp để chạy Twins.
+        # -----------------------------------------------------
+
+        # Tìm Backbones dựa trên Uncovered Demands
+        sym_pairs = self._find_symmetry_backbones(full_neighbours, candidates_list, uncovered_set, at_least_pairs)
+        n_sym_clauses = self._encode_symmetry_breaking(cnf, sym_pairs)
+        
+        if DEBUG_REDUCTION and n_sym_clauses > 0:
+            print(f"[SYMMETRY] Radius {radius}: Added {n_sym_clauses} clauses (Candidates: {len(candidates_list)}).")
+        
+        # 4. Tiếp tục encode Coverage Constraints
+        for u in uncovered_demands_list:
             allowed = [self._y(c) for c in Npp if self.dist[c][u] <= radius + eps]
-            if not allowed:  
-                return None, {}
+            if not allowed: return None, {}
             cnf.append(allowed)
 
-        candidates = sorted(list(Npp))
-
-        cover = {}
-        for u in uncovered_demands:
-            cover[u] = [c for c in candidates if self.dist[c][u] <= radius + eps]
-        
-        cand_set = set(candidates)
-
-        sb_extra_pairs = [(a, b) for (a, b) in extra_pairs if (a in cand_set and b in cand_set)]
-        sb_units_true = [u for u in extra_units_true if u in cand_set]
-
-        cnf.nv = max(getattr(cnf, "nv", 0), self._y(self.n - 1) if self.n > 0 else 0)
-
-
-        if candidates:
-            sb_stats = _OEC_SB.add_sb(
-                cnf,
-                candidates=candidates,
-                cover=cover,
-                y_func=self._y,
-                extra_pairs=sb_extra_pairs,
-                unit_true=sb_units_true,
-                min_class_size=2,
-                exclude_unit_true=True,
-            )
-
-            # --- SB statistics log ---
-            print(
-                f"[SB] R={radius} "
-                f"enabled={sb_stats.enabled} "
-                f"cand_in={sb_stats.n_candidates_in} used={sb_stats.n_candidates_used} "
-                f"classes={sb_stats.n_classes} ge2={sb_stats.n_classes_ge2} "
-                f"max_class={sb_stats.max_class_size} "
-                f"sb_clauses={sb_stats.sb_clauses_added} "
-                f"uncovered={len(uncovered_demands)} "
-                f"extra_pairs={len(sb_extra_pairs)} unit_true={len(sb_units_true)}",
-                flush=True,
-            )
-
-
-        # 2) chuẩn bị top_id
+        candidates = candidates_list     
         y_vars_ordered = [self._y(c) for c in candidates]
         top_id = max(getattr(cnf, "nv", 0), max(y_vars_ordered, default=0))
 
