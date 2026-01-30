@@ -417,11 +417,22 @@ class PCenterSAT:
             max_y = max(self._y(j) for j in range(self.n)) if self.n > 0 else existing_max
             top_id = max(existing_max, max_y)
 
-            if encoding == "pysat_sc":
-                enc_kind = CardEncType.seqcounter
+            if encoding == "pysat_kmtotalizer":
+                enc_kind = CardEncType.kmtotalizer
                 with _PYSAT_CNF_LOCK:
-                    amo = CardEnc.atmost(lits=lits,
-                                         bound=bound, top_id=top_id, encoding=enc_kind)
+                    amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                    cnf.extend(amo.clauses)
+                    cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+            if encoding == "pysat_mtotalizer":
+                enc_kind = CardEncType.mtotalizer
+                with _PYSAT_CNF_LOCK:
+                    amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                    cnf.extend(amo.clauses)
+                    cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+            if encoding == "pysat_totalizer":
+                enc_kind = CardEncType.totalizer
+                with _PYSAT_CNF_LOCK:
+                    amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                     cnf.extend(amo.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
             elif encoding == "nsc":
