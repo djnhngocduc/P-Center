@@ -12,7 +12,7 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb import _sb_identical_neighbourhood, _sb_component_lex, _sb_prefix_bound
+from sb import sb_identical_neighbourhood
 
 
 _PYSAT_CNF_LOCK = RLock()
@@ -407,7 +407,7 @@ class PCenterSAT:
 
         candidates = sorted(list(Npp))
 
-        _sb_identical_neighbourhood(self, cnf, radius, candidates, demands, Nc)
+        sb_identical_neighbourhood(self, cnf, radius, candidates, demands, Nc)
 
         bound = self.p - len(Nc)      
         if bound < 0:
