@@ -407,7 +407,11 @@ class PCenterSAT:
 
         candidates = sorted(list(Npp))
 
-        sb_coverage_order(self, cnf, radius, candidates, demands, Nc)
+        sb_coverage_order(
+            self, cnf, radius, candidates, demands, Nc,
+            enable_orbit_sb=True,
+            orbit_mode="chain"  # hoặc "leader"
+        )
 
         bound = self.p - len(Nc)      
         if bound < 0:
