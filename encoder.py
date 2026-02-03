@@ -407,7 +407,7 @@ class PCenterSAT:
 
         candidates = sorted(list(Npp))
 
-        sb_identical_neighbourhood(self, cnf, radius, candidates, demands, Nc)
+        # sb_identical_neighbourhood(self, cnf, radius, candidates, demands, Nc)
 
         bound = self.p - len(Nc)      
         if bound < 0:
