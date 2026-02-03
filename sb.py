@@ -1,6 +1,6 @@
 # sb.py
 from __future__ import annotations
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set
 
 try:
     import pynauty
@@ -21,26 +21,34 @@ def _facility_orbits_from_incidence_graph(
 
     Return orbits for facility vertices only, in terms of original facility ids (candidates values).
 
-    If pynauty is unavailable or something fails, return [].
+    Safe behavior:
+      - If pynauty unavailable: return []
+      - If active_demands empty: all remaining facilities symmetric => one orbit
+      - If orbit extraction fails: return []
     """
-    if pynauty is None:
-        return []
-
     m = len(candidates)
     k = len(active_demands)
+
     if m <= 1:
+        return []
+
+    # Special case: no active demands -> facilities are indistinguishable w.r.t. coverage constraints
+    # (only the at-most-p remains). Safe to impose orbit SB directly without nauty.
+    if k == 0:
+        return [sorted(candidates)]
+
+    if pynauty is None:
         return []
 
     # Map demand id -> right-vertex index 0..k-1
     d_index = {u: idx for idx, u in enumerate(active_demands)}
 
-    # Build adjacency for graph with V = m + k vertices (0..m-1 facilities, m..m+k-1 demands)
+    # Build adjacency for graph with V = m + k vertices:
+    # facilities: 0..m-1, demands: m..m+k-1
     V = m + k
     adj: Dict[int, Set[int]] = {v: set() for v in range(V)}
 
-    # Add edges
     for fi, f in enumerate(candidates):
-        # fi in [0..m-1]
         for u in cover.get(f, ()):
             dj = d_index.get(u)
             if dj is None:
@@ -49,11 +57,9 @@ def _facility_orbits_from_incidence_graph(
             adj[fi].add(v_d)
             adj[v_d].add(fi)
 
-    # Convert adjacency sets to sorted lists as pynauty expects
-    adjacency_dict = {v: sorted(list(nbs)) for v, nbs in adj.items()}
+    adjacency_dict = {v: sorted(nbs) for v, nbs in adj.items()}
 
-    # Vertex coloring (partitions) to forbid swapping facility<->demand
-    # Two color classes: facilities and demands
+    # Two color classes (partitions) to forbid swapping facility <-> demand
     facility_vertices = set(range(m))
     demand_vertices = set(range(m, m + k))
     vertex_coloring = [facility_vertices, demand_vertices]
@@ -66,28 +72,36 @@ def _facility_orbits_from_incidence_graph(
             vertex_coloring=vertex_coloring,
         )
 
-        # Different pynauty builds expose different APIs.
-        # We'll try a few common ones safely.
         orbits = None
 
-        # 1) pynauty.autgrp(g) -> (gens, grpsize1, grpsize2, orbits, numorbits) in some versions
+        # Preferred: autgrp convention often returns orbits at index 3
         if hasattr(pynauty, "autgrp"):
             res = pynauty.autgrp(g)
-            # try to locate 'orbits' inside res
-            # res might be tuple; orbits usually is a list of ints length V
             if isinstance(res, tuple):
-                for item in res:
-                    if isinstance(item, list) and len(item) == V and all(isinstance(x, int) for x in item):
-                        orbits = item
-                        break
+                if (
+                    len(res) >= 4
+                    and isinstance(res[3], list)
+                    and len(res[3]) == V
+                    and all(isinstance(x, int) for x in res[3])
+                ):
+                    orbits = res[3]
+                else:
+                    # Fallback scan for a list[int] of length V
+                    for item in res:
+                        if (
+                            isinstance(item, list)
+                            and len(item) == V
+                            and all(isinstance(x, int) for x in item)
+                        ):
+                            orbits = item
+                            break
 
-        # 2) pynauty.orbits(g) -> list[int] in some versions
+        # Alternative API: pynauty.orbits(g)
         if orbits is None and hasattr(pynauty, "orbits"):
             tmp = pynauty.orbits(g)
-            if isinstance(tmp, list) and len(tmp) == V:
+            if isinstance(tmp, list) and len(tmp) == V and all(isinstance(x, int) for x in tmp):
                 orbits = tmp
 
-        # If still unknown, bail out safely
         if orbits is None:
             return []
 
@@ -97,19 +111,16 @@ def _facility_orbits_from_incidence_graph(
             oid = orbits[fi]
             groups.setdefault(oid, []).append(fi)
 
-        # Keep only non-trivial orbits (size >= 2), map back to facility ids
+        # Keep only non-trivial facility orbits (size >= 2), map back to facility ids
         facility_orbits: List[List[int]] = []
-        for _, idxs in groups.items():
+        for idxs in groups.values():
             if len(idxs) >= 2:
-                orb_facilities = [candidates[fi] for fi in sorted(idxs)]
-                facility_orbits.append(orb_facilities)
+                facility_orbits.append([candidates[fi] for fi in sorted(idxs)])
 
-        # Sort orbits for determinism
         facility_orbits.sort(key=lambda lst: (len(lst), lst[0]))
         return facility_orbits
 
     except Exception:
-        # Must be safe: if orbit extraction fails, just skip.
         return []
 
 
@@ -153,16 +164,18 @@ def sb_coverage_order(
     Nc: Set[int],
     *,
     enable_orbit_sb: bool = True,
-    orbit_mode: str = "chain",   # "chain" or "leader"
-):
+    orbit_mode: str = "chain",  # "chain" or "leader"
+) -> None:
     """
     STRONG & SAFE dominance-based ordering:
     enforce ordering only when coverage inclusion holds.
 
     Optional: orbit-based SB via automorphisms of the incidence graph (facility-demands),
     applied on remaining candidates and active demands.
-    """
 
+    - dominance part: always safe (dominance pruning)
+    - orbit part: safe iff orbits extracted from correctly partitioned incidence graph
+    """
     eps = 1e-12
 
     # active demands = chưa được cover bởi Nc
@@ -171,12 +184,12 @@ def sb_coverage_order(
         if not any(self.dist[c][u] <= radius + eps for c in Nc)
     ]
 
-    # build coverage sets
+    # build coverage sets on active demands
     cover: Dict[int, Set[int]] = {}
     for c in candidates:
         cover[c] = {u for u in active_demands if self.dist[c][u] <= radius + eps}
 
-    # -------- dominance-based ordering (your current SB) --------
+    # -------- dominance-based ordering --------
     for i, ci in enumerate(candidates):
         for cj in candidates[i + 1:]:
             if cover[ci] >= cover[cj] and cover[ci] != cover[cj]:
@@ -197,5 +210,4 @@ def sb_coverage_order(
             if orbit_mode == "leader":
                 _add_orbit_sb_leader(self, cnf, facility_orbits)
             else:
-                # default: chain
                 _add_orbit_sb_chain(self, cnf, facility_orbits)
