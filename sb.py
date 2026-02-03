@@ -1,42 +1,13 @@
-from collections import defaultdict
-
-def sb_identical_neighbourhood(self, cnf, radius, candidates, demands, Nc):
+def sb_smallest_k(self, cnf, candidates, bound):
     """
-    Safe symmetry breaking:
-    apply ordering only to centers with truly identical coverage
-    AFTER reduction (Nc fixed).
+    SAFE & STRONG symmetry breaking:
+    only allow selecting among the 'bound' smallest candidate indices.
     """
+    if bound <= 0:
+        return
 
-    signature = defaultdict(list)
+    candidates = sorted(candidates)
 
-    # chỉ xét demand CHƯA được cover bởi Nc
-    active_demands = []
-    for u in demands:
-        covered = False
-        for c in Nc:
-            if self.dist[c][u] <= radius + 1e-12:
-                covered = True
-                break
-        if not covered:
-            active_demands.append(u)
-
-    # build exact coverage signature
-    for c in candidates:
-        covered = []
-        for u in active_demands:
-            if self.dist[c][u] <= radius + 1e-12:
-                covered.append(u)
-        signature[tuple(covered)].append(c)
-
-    # lex-chain ONLY inside true equivalence classes
-    for group in signature.values():
-        if len(group) <= 1:
-            continue
-
-        group.sort()
-        for i in range(1, len(group)):
-            # y[group[i]] -> y[group[i-1]]
-            cnf.append([
-                -self._y(group[i]),
-                 self._y(group[i - 1])
-            ])
+    # forbid selecting larger indices
+    for c in candidates[bound:]:
+        cnf.append([-self._y(c)])

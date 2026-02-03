@@ -12,7 +12,7 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb import sb_identical_neighbourhood
+from sb import sb_smallest_k
 
 
 _PYSAT_CNF_LOCK = RLock()
@@ -406,14 +406,13 @@ class PCenterSAT:
             cnf.append(allowed)
 
         candidates = sorted(list(Npp))
-
-        # sb_identical_neighbourhood(self, cnf, radius, candidates, demands, Nc)
-
         bound = self.p - len(Nc)      
         if bound < 0:
             if DEBUG_REDUCTION:
                 print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
             return None, {}
+        
+        sb_smallest_k(self, cnf, candidates, bound)
 
         if candidates:
             lits = [self._y(j) for j in candidates]
