@@ -408,7 +408,7 @@ class PCenterSAT:
         candidates = sorted(list(Npp))
 
         _sb_identical_neighbourhood(self, cnf, radius, Npp, demands)
-        _sb_component_lex(self, cnf, candidates)
+        _sb_component_lex(self, cnf, radius, candidates)
 
         bound = self.p - len(Nc)
 
