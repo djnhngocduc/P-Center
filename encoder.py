@@ -26,6 +26,7 @@ class PCenterSAT:
         self.p: int = int(p)
         self.dist: List[List[float]] = dist
         self.radii: List[float] = self._compute_radii(dist)
+        self.y_lit_all = [self._y(i) for i in range(self.n)] 
 
     def _y(self, j: int) -> int:
         # 1..n
@@ -380,6 +381,9 @@ class PCenterSAT:
 
         Nc, Nd, enabled_centers, demands, cnf_extra = self.compute_reduction(radius)
 
+        ylit = self.y_lit_all
+        dist = self.dist
+        
         for clause in cnf_extra:
             cnf.append(clause)
 
@@ -390,22 +394,30 @@ class PCenterSAT:
             cnf.append([-self._y(d)])
 
         Npp = (enabled_centers - Nc) - Nd
+        candidates = sorted(list(Npp))
 
-        def covered_by_Nc(u: int) -> bool:
+        covered = [False] * self.n
+        if Nc:
+            # only check u in demands
             for c in Nc:
-                if self.dist[c][u] <= radius + 1e-12:
-                    return True
-            return False
+                row = dist[c]
+                for u in demands:
+                    if not covered[u] and row[u] <= radius + 1e-12:
+                        covered[u] = True
 
+        # ---- demand coverage clauses using candidates list (avoid set scans)
         for u in demands:
-            if covered_by_Nc(u):
+            if covered[u]:
                 continue
-            allowed = [self._y(c) for c in Npp if self.dist[c][u] <= radius + 1e-12]
-            if not allowed:  
+            row_u = u  # just name
+            allowed = []
+            # scan candidates once
+            for c in candidates:
+                if dist[c][row_u] <= radius + 1e-12:
+                    allowed.append(ylit[c])
+            if not allowed:
                 return None, {}
             cnf.append(allowed)
-
-        candidates = sorted(list(Npp))
 
         # cnf_extra contains clauses [y(a), y(b)] where y(j)=1+j
         pair_clauses = []
@@ -431,10 +443,10 @@ class PCenterSAT:
             return None, {}
 
         if candidates:
-            lits = [self._y(j) for j in candidates]
+            lits = [ylit[j] for j in candidates]
 
-            existing_max = cnf.nv if hasattr(cnf, "nv") else 0
-            max_y = max(self._y(j) for j in range(self.n)) if self.n > 0 else existing_max
+            existing_max = getattr(cnf, "nv", 0)
+            max_y = ylit[-1] if self.n > 0 else existing_max
             top_id = max(existing_max, max_y)
 
             if encoding == "pysat_kmtotalizer":
@@ -443,13 +455,13 @@ class PCenterSAT:
                     amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                     cnf.extend(amo.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-            if encoding == "pysat_mtotalizer":
+            elif encoding == "pysat_mtotalizer":
                 enc_kind = CardEncType.mtotalizer
                 with _PYSAT_CNF_LOCK:
                     amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                     cnf.extend(amo.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-            if encoding == "pysat_totalizer":
+            elif encoding == "pysat_totalizer":
                 enc_kind = CardEncType.totalizer
                 with _PYSAT_CNF_LOCK:
                     amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)

@@ -6,19 +6,23 @@ from typing import Dict, List, Set, Tuple, Optional
 def _add_chain_sb(self, cnf, group: List[int], y_lit_all: List[int]) -> None:
     if len(group) < 2:
         return
-    g = sorted(group)
-    for a, b in zip(g, g[1:]):
-        cnf.append([-y_lit_all[b], y_lit_all[a]])
+    group.sort()
+    append = cnf.append
+    ylit = y_lit_all
+    for a, b in zip(group, group[1:]):
+        append([-ylit[b], ylit[a]])
 
 
 def _add_leader_sb(self, cnf, group: List[int], y_lit_all: List[int]) -> None:
     if len(group) < 2:
         return
-    g = sorted(group)
-    leader = g[0]
+    group.sort()
+    leader = group[0]
     yl = y_lit_all[leader]
-    for j in g[1:]:
-        cnf.append([-y_lit_all[j], yl])
+    append = cnf.append
+    ylit = y_lit_all
+    for j in group[1:]:
+        append([-ylit[j], yl])
 
 
 def sb_coverage_order(
@@ -30,24 +34,30 @@ def sb_coverage_order(
     Nc: Set[int],
     *,
     enable_orbit_sb: bool = True,
-    orbit_mode: str = "chain",  # "chain" | "leader"
+    orbit_mode: str = "chain",
     pair_clauses: Optional[List[Tuple[int, int]]] = None,
 ) -> None:
     eps = 1e-12
-    pair_clauses = pair_clauses or []
+    if pair_clauses is None:
+        pair_clauses = []
 
     if len(candidates) <= 1:
         return
 
     dist = self.dist
     rad = radius + eps
+    n = self.n
 
-    # Fast literal lookup (indices 0..n-1)
-    y = self._y
-    y_lit_all = [y(i) for i in range(self.n)]
+    y_lit_all = getattr(self, "y_lit_all", None)
+    if y_lit_all is None:
+        y = self._y
+        y_lit_all = [y(i) for i in range(n)]
+
+    append = cnf.append
+    ylit = y_lit_all
 
     # -----------------------
-    # Active demands (not covered by Nc): break early + cache Nc rows
+    # Active demands
     # -----------------------
     if Nc:
         Nc_rows = [dist[c] for c in Nc]
@@ -64,9 +74,8 @@ def sb_coverage_order(
     k = len(active_demands)
 
     # -----------------------
-    # A1: coverage bitmasks + group by mask
+    # A1: cover bitmasks + group
     # -----------------------
-    cover_mask: Dict[int, int] = {}
     mask2cands: Dict[int, List[int]] = {}
 
     if k > 0:
@@ -77,18 +86,15 @@ def sb_coverage_order(
             for bit, u in enumerate(act):
                 if row[u] <= rad:
                     m |= (1 << bit)
-            cover_mask[c] = m
             mask2cands.setdefault(m, []).append(c)
     else:
-        for c in candidates:
-            cover_mask[c] = 0
         mask2cands = {0: list(candidates)}
 
     for lst in mask2cands.values():
         lst.sort()
 
     # -----------------------
-    # A2: bucket masks by popcount
+    # A2: bucket by popcount
     # -----------------------
     size2masks: Dict[int, List[int]] = {}
     for m in mask2cands.keys():
@@ -98,14 +104,20 @@ def sb_coverage_order(
     for s in sizes:
         size2masks[s].sort()
 
-    dom_out: Dict[int, Set[int]] = {c: set() for c in candidates}
-    dom_in: Dict[int, Set[int]] = {c: set() for c in candidates}
+    # -----------------------
+    # Dominance: LAZY
+    # -----------------------
+    dom_out: Dict[int, Set[int]] = {}
+    dom_in: Dict[int, Set[int]] = {}
 
     # -----------------------
-    # FULL dominance ordering (sound)
+    # FULL dominance ordering
     # -----------------------
     if k > 0 and len(sizes) > 1:
         ALL = (1 << k) - 1
+        dom_out_setdefault = dom_out.setdefault
+        dom_in_setdefault = dom_in.setdefault
+
         for i, s_hi in enumerate(sizes):
             hi_masks = size2masks[s_hi]
             for s_lo in sizes[i + 1:]:
@@ -113,60 +125,129 @@ def sb_coverage_order(
 
                 for mi in hi_masks:
                     hi_nodes = mask2cands[mi]
-                    nmi = ALL ^ mi  # complement in k bits
+                    nmi = ALL ^ mi
 
                     for mj in lo_masks:
-                        # mj ⊆ mi ?
                         if (mj & nmi) != 0:
                             continue
-
                         lo_nodes = mask2cands[mj]
 
                         for cj in lo_nodes:
-                            out_cj = dom_out[cj]
-                            ycj = -y_lit_all[cj]
+                            out_cj = dom_out_setdefault(cj, set())
+                            ycj = -ylit[cj]
                             for ci in hi_nodes:
                                 if ci in out_cj:
                                     continue
-                                cnf.append([ycj, y_lit_all[ci]])
+                                append([ycj, ylit[ci]])
                                 out_cj.add(ci)
-                                dom_in[ci].add(cj)
+                                dom_in_setdefault(ci, set()).add(cj)
 
     # -----------------------
-    # orbit-safe equivalence SB (level-1 optimized, ALWAYS tries to add if groups exist)
-    #  - reuse mask2cands (no extra mask_groups dict)
-    #  - freeze sets once (avoid frozenset(...) per signature creation)
+    # orbit-SB optimized
+    #   - no O(n) fresh allocations: reuse buffers on self
+    #   - signature key is INT (packed), no tuple alloc
     # -----------------------
-    if not enable_orbit_sb or len(candidates) <= 1:
+    if not enable_orbit_sb:
         return
 
-    # pair adjacency among candidates
-    pair_adj: Dict[int, Set[int]] = {c: set() for c in candidates}
+    # reuse buffers
+    mark = getattr(self, "_sb_mark", None)
+    idx_of = getattr(self, "_sb_idx_of", None)
+    if mark is None or len(mark) != n:
+        mark = [0] * n
+        self._sb_mark = mark
+    if idx_of is None or len(idx_of) != n:
+        idx_of = [-1] * n
+        self._sb_idx_of = idx_of
+
+    tick = getattr(self, "_sb_tick", 0) + 1
+    if tick == 0x7FFFFFFF:
+        # rare: reset marks
+        for i in range(n):
+            mark[i] = 0
+        tick = 1
+    self._sb_tick = tick
+
+    orbit_nodes: List[int] = []
+    for group in mask2cands.values():
+        if len(group) >= 2:
+            for c in group:
+                if mark[c] != tick:
+                    mark[c] = tick
+                    orbit_nodes.append(c)
+
+    if not orbit_nodes:
+        return
+
+    # assign orbit indices
+    for i, c in enumerate(orbit_nodes):
+        idx_of[c] = i
+    m_orb = len(orbit_nodes)
+
+    pair_mask_orb = [0] * m_orb
     if pair_clauses:
         for a, b in pair_clauses:
-            if a in pair_adj and b in pair_adj:
-                pair_adj[a].add(b)
-                pair_adj[b].add(a)
+            ia = idx_of[a]
+            if ia < 0:
+                continue
+            ib = idx_of[b]
+            if ib < 0:
+                continue
+            pair_mask_orb[ia] |= (1 << ib)
+            pair_mask_orb[ib] |= (1 << ia)
 
-    # freeze once
-    pair_adj_f = {c: frozenset(pair_adj[c]) for c in candidates}
-    dom_out_f = {c: frozenset(dom_out[c]) for c in candidates}
-    dom_in_f  = {c: frozenset(dom_in[c])  for c in candidates}
+    dom_out_mask_orb = [0] * m_orb
+    dom_in_mask_orb = [0] * m_orb
 
-    # iterate per mask-group using existing mask2cands
-    for _, group in mask2cands.items():
+    dom_out_get = dom_out.get
+    dom_in_get = dom_in.get
+
+    for c in orbit_nodes:
+        ic = idx_of[c]
+
+        mo = 0
+        for v in dom_out_get(c, ()):
+            j = idx_of[v]
+            if j >= 0:
+                mo |= (1 << j)
+        dom_out_mask_orb[ic] = mo
+
+        mi = 0
+        for v in dom_in_get(c, ()):
+            j = idx_of[v]
+            if j >= 0:
+                mi |= (1 << j)
+        dom_in_mask_orb[ic] = mi
+
+    add_sb = _add_leader_sb if orbit_mode == "leader" else _add_chain_sb
+
+    # pack 3 masks into 1 int key to avoid tuple alloc/hash
+    # (Python int is arbitrary precision, safe)
+    def pack_key(pm: int, om: int, im: int) -> int:
+        return (pm << (2 * m_orb)) | (om << m_orb) | im
+
+    for group in mask2cands.values():
         if len(group) < 2:
             continue
 
-        sig2group: Dict[Tuple[object, object, object], List[int]] = {}
+        sig2group: Dict[int, List[int]] = {}
+        count = 0
+
         for c in group:
-            sig = (pair_adj_f[c], dom_out_f[c], dom_in_f[c])
-            sig2group.setdefault(sig, []).append(c)
+            ic = idx_of[c]
+            if ic < 0:
+                continue
+            count += 1
+            key = pack_key(pair_mask_orb[ic], dom_out_mask_orb[ic], dom_in_mask_orb[ic])
+            sig2group.setdefault(key, []).append(c)
+
+        if count < 2:
+            continue
 
         for g in sig2group.values():
-            if len(g) < 2:
-                continue
-            if orbit_mode == "leader":
-                _add_leader_sb(self, cnf, g, y_lit_all)
-            else:
-                _add_chain_sb(self, cnf, g, y_lit_all)
+            if len(g) >= 2:
+                add_sb(self, cnf, g, ylit)
+
+    # cleanup idx_of for orbit nodes only (avoid O(n))
+    for c in orbit_nodes:
+        idx_of[c] = -1
