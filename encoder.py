@@ -407,10 +407,19 @@ class PCenterSAT:
 
         candidates = sorted(list(Npp))
 
+        # cnf_extra contains clauses [y(a), y(b)] where y(j)=1+j
+        pair_clauses = []
+        for cl in cnf_extra:
+            if len(cl) == 2 and cl[0] > 0 and cl[1] > 0:
+                a = cl[0] - 1
+                b = cl[1] - 1
+                pair_clauses.append((a, b))
+
         sb_coverage_order(
             self, cnf, radius, candidates, demands, Nc,
             enable_orbit_sb=True,
-            orbit_mode="chain"  # hoặc "leader"
+            orbit_mode="chain",
+            pair_clauses=pair_clauses
         )
 
         bound = self.p - len(Nc)      
