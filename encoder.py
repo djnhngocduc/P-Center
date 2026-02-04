@@ -12,7 +12,7 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb import sb_coverage_order, orbit_sb_y_only, add_orbit_sb_clauses
+from sb import sb_coverage_order
 
 
 _PYSAT_CNF_LOCK = RLock()
