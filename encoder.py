@@ -12,7 +12,7 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb import sb_coverage_order
+from sb import sb_coverage_order, orbit_sb_from_cnf
 
 
 _PYSAT_CNF_LOCK = RLock()
@@ -406,43 +406,8 @@ class PCenterSAT:
             cnf.append(allowed)
 
         candidates = sorted(list(Npp))
-        candidates_set = set(candidates)
 
-        # cnf_extra contains clauses [y(a), y(b)] where y(j)=1+j
-        pair_clauses = []
-        forced_true = set()
-
-        for cl in cnf_extra:
-            if len(cl) != 2:
-                continue
-            if cl[0] <= 0 or cl[1] <= 0:
-                continue
-
-            a = cl[0] - 1
-            b = cl[1] - 1
-
-            a_in = a in candidates_set
-            b_in = b in candidates_set
-
-            if a_in and b_in:
-                # keep as pair constraint between candidates
-                pair_clauses.append((a, b))
-            else:
-                # IMPORTANT: handle simplification with Nd
-                # if one endpoint is fixed FALSE (Nd), the other is forced TRUE.
-                # if one endpoint is fixed TRUE (Nc), the clause is already satisfied (no forcing).
-                if (a in Nd) and b_in:
-                    forced_true.add(b)
-                if (b in Nd) and a_in:
-                    forced_true.add(a)
-
-        sb_coverage_order(
-            self, cnf, radius, candidates, demands, Nc,
-            enable_orbit_sb=True,
-            orbit_mode="chain",
-            pair_clauses=pair_clauses,
-            forced_true=forced_true,
-        )
+        sb_coverage_order(self, cnf, radius, candidates, demands, Nc)
 
         bound = self.p - len(Nc)      
         if bound < 0:
@@ -491,6 +456,9 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
+
+        y_vars = [self._y(j) for j in candidates]
+        orbit_sb_from_cnf(self, cnf, y_vars, orbit_mode="chain")
 
         info = {
             "Nc": Nc, "Nd": Nd,
