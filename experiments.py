@@ -902,7 +902,7 @@ def run_experiment(
 
     for encoding in encodings:
         for solver_name in solvers:
-            for run_id in range(5):
+            for run_id in range(1):
                 print(
                     f"[RUN] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"encoding={encoding} solver={solver_name}",
