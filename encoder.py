@@ -12,7 +12,7 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb import sb_coverage_order, orbit_sb_from_cnf
+from sb import sb_coverage_order, orbit_sb_y_only, add_orbit_sb_clauses
 
 
 _PYSAT_CNF_LOCK = RLock()
@@ -409,6 +409,11 @@ class PCenterSAT:
 
         sb_coverage_order(self, cnf, radius, candidates, demands, Nc)
 
+        # ===== ORBIT-SB (Y-ONLY) snapshot BEFORE at-most encoding =====
+        y_vars = [self._y(j) for j in candidates]  # only candidate y-vars
+        pre_atmost_clauses = [cl[:] for cl in cnf.clauses]  # snapshot clauses so far
+        # =============================================================
+
         bound = self.p - len(Nc)      
         if bound < 0:
             if DEBUG_REDUCTION:
@@ -457,8 +462,10 @@ class PCenterSAT:
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
 
-        y_vars = [self._y(j) for j in candidates]
-        orbit_sb_from_cnf(self, cnf, y_vars, orbit_mode="chain")
+        # ===== ORBIT-SB computed on Y-only CNF (pre at-most), then applied to final CNF =====
+        orbit_groups = orbit_sb_y_only(pre_atmost_clauses, y_vars, orbit_mode="chain")
+        add_orbit_sb_clauses(cnf, orbit_groups, orbit_mode="chain")
+        # ================================================================================
 
         info = {
             "Nc": Nc, "Nd": Nd,
