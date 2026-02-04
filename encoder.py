@@ -407,12 +407,22 @@ class PCenterSAT:
 
         candidates = sorted(list(Npp))
 
-        sb_coverage_order(self, cnf, radius, candidates, demands, Nc)
+        # cnf_extra contains clauses [y(a), y(b)] where y(j)=1+j
+        pair_clauses = []
+        for cl in cnf_extra:
+            if len(cl) == 2 and cl[0] > 0 and cl[1] > 0:
+                a = cl[0] - 1
+                b = cl[1] - 1
+                pair_clauses.append((a, b))
 
-        # ===== ORBIT-SB (Y-ONLY) snapshot BEFORE at-most encoding =====
-        y_vars = [self._y(j) for j in candidates]  # only candidate y-vars
-        pre_atmost_clauses = [cl[:] for cl in cnf.clauses]  # snapshot clauses so far
-        # =============================================================
+
+        sb_coverage_order(
+            self, cnf, radius, candidates, demands, Nc,
+            enable_orbit_sb=True,
+            orbit_mode="chain",     # hoặc "leader"
+            pair_clauses=pair_clauses
+        )
+
 
         bound = self.p - len(Nc)      
         if bound < 0:
@@ -461,11 +471,6 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
-
-        # ===== ORBIT-SB computed on Y-only CNF (pre at-most), then applied to final CNF =====
-        orbit_groups = orbit_sb_y_only(pre_atmost_clauses, y_vars, orbit_mode="chain")
-        add_orbit_sb_clauses(cnf, orbit_groups, orbit_mode="chain")
-        # ================================================================================
 
         info = {
             "Nc": Nc, "Nd": Nd,
