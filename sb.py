@@ -14,23 +14,21 @@ def _facility_orbits_from_structure(
     active_demands: List[int],
     pair_clauses: List[Tuple[int, int]],
     forced_true: Set[int],
+    dom_imps: List[Tuple[int, int]],  # (src, dst) meaning y[src] -> y[dst]
 ) -> List[List[int]]:
     """
-    Build a colored graph capturing constraints that distinguish facilities:
+    Colored undirected graph encoding:
+      - cover incidence (facility-demand)
+      - pair clauses y(a) OR y(b) via pair nodes
+      - forced_true markers
+      - dominance implications y(src) -> y(dst) via directed gadget:
+          For each implication, create:
+            imp core node P
+            src-end node S, dst-end node T
+          edges: P-S, P-T, S-f(src), T-f(dst)
+          color classes separate S and T so direction is preserved.
 
-      Part 1: facilities (candidates)
-      Part 2: active demands
-      Part 3: pair-constraint nodes, one for each clause (y(a) OR y(b)) where both a,b are in candidates
-      Part 4: forced-true markers, one node per forced facility in candidates
-
-    Edges:
-      - facility -- demand iff demand in cover[facility]
-      - pairNode -- facility(a) and pairNode -- facility(b)
-      - forceNode -- facility(f)  (marks y(f) is forced TRUE after simplification)
-
-    Return facility orbits only (list of lists of facility ids).
-
-    If pynauty is unavailable or fails, return [] (safe: orbit-SB disabled).
+    Return facility orbits only.
     """
     if pynauty is None:
         return []
@@ -39,26 +37,35 @@ def _facility_orbits_from_structure(
     if m <= 1:
         return []
 
-    k = len(active_demands)
-    # Filter forced_true to only candidates
     cand_set = set(candidates)
-    forced = sorted([f for f in forced_true if f in cand_set])
-    s = len(forced)
+    k = len(active_demands)
 
-    # Filter pair_clauses to only those with both endpoints in candidates
+    # filter / normalize inputs to candidates only
+    forced = sorted([f for f in forced_true if f in cand_set])
+
     pair_filtered: List[Tuple[int, int]] = []
     for a, b in pair_clauses:
         if a in cand_set and b in cand_set:
-            pair_filtered.append((a, b))
+            if a <= b:
+                pair_filtered.append((a, b))
+            else:
+                pair_filtered.append((b, a))
+
+    dom_filtered: List[Tuple[int, int]] = []
+    for src, dst in dom_imps:
+        if src in cand_set and dst in cand_set and src != dst:
+            dom_filtered.append((src, dst))
+
     q = len(pair_filtered)
+    s = len(forced)
+    r = len(dom_filtered)
 
     # If nothing distinguishes facilities, all remaining facilities are symmetric
-    if k == 0 and q == 0 and s == 0:
+    if k == 0 and q == 0 and s == 0 and r == 0:
         return [sorted(candidates)]
 
-    # Map facility id -> facility-vertex index 0..m-1
+    # indices
     f_index = {f: i for i, f in enumerate(candidates)}
-    # Map demand id -> demand-vertex index 0..k-1
     d_index = {u: i for i, u in enumerate(active_demands)}
 
     # Vertex ranges:
@@ -66,7 +73,16 @@ def _facility_orbits_from_structure(
     # demands   : [m, m+k-1]
     # pairs     : [m+k, m+k+q-1]
     # forces    : [m+k+q, m+k+q+s-1]
-    V = m + k + q + s
+    # dom-core  : [base_dom, base_dom+r-1]
+    # dom-src   : [base_dom_src, base_dom_src+r-1]
+    # dom-dst   : [base_dom_dst, base_dom_dst+r-1]
+    base_pairs = m + k
+    base_forces = base_pairs + q
+    base_dom = base_forces + s
+    base_dom_src = base_dom + r
+    base_dom_dst = base_dom_src + r
+    V = base_dom_dst + r
+
     adj: Dict[int, Set[int]] = {v: set() for v in range(V)}
 
     # facility-demand edges
@@ -79,36 +95,55 @@ def _facility_orbits_from_structure(
             adj[fi].add(v_d)
             adj[v_d].add(fi)
 
-    # pair constraint nodes (only between candidate facilities)
-    base_pair = m + k
+    # pair nodes
     for t, (a, b) in enumerate(pair_filtered):
         va = f_index.get(a)
         vb = f_index.get(b)
         if va is None or vb is None:
             continue
-        vp = base_pair + t
+        vp = base_pairs + t
         adj[vp].add(va); adj[va].add(vp)
         adj[vp].add(vb); adj[vb].add(vp)
 
-    # forced-true marker nodes
-    base_force = m + k + q
+    # forced true markers
     for t, f in enumerate(forced):
         vf = f_index.get(f)
         if vf is None:
             continue
-        vmark = base_force + t
-        adj[vmark].add(vf); adj[vf].add(vmark)
+        vm = base_forces + t
+        adj[vm].add(vf); adj[vf].add(vm)
+
+    # dominance implication gadgets (directed in undirected colored graph)
+    # For each (src,dst):
+    #   core = P, srcEnd = S, dstEnd = T
+    #   edges: P-S, P-T, S-f(src), T-f(dst)
+    for t, (src, dst) in enumerate(dom_filtered):
+        vsrc = f_index.get(src)
+        vdst = f_index.get(dst)
+        if vsrc is None or vdst is None:
+            continue
+        P = base_dom + t
+        S = base_dom_src + t
+        T = base_dom_dst + t
+
+        adj[P].add(S); adj[S].add(P)
+        adj[P].add(T); adj[T].add(P)
+
+        adj[S].add(vsrc); adj[vsrc].add(S)
+        adj[T].add(vdst); adj[vdst].add(T)
 
     adjacency_dict = {v: sorted(list(nbs)) for v, nbs in adj.items()}
 
-    # Color classes to forbid swapping between parts
+    # color classes
     facilities = set(range(m))
     demands = set(range(m, m + k))
-    pairs = set(range(m + k, m + k + q))
-    forces = set(range(m + k + q, V))
-    vertex_coloring = [facilities, demands, pairs, forces]
+    pairs = set(range(base_pairs, base_pairs + q))
+    forces = set(range(base_forces, base_forces + s))
+    dom_core = set(range(base_dom, base_dom + r))
+    dom_src = set(range(base_dom_src, base_dom_src + r))
+    dom_dst = set(range(base_dom_dst, base_dom_dst + r))
 
-    # remove empty color classes (some pynauty builds dislike empty partitions)
+    vertex_coloring = [facilities, demands, pairs, forces, dom_core, dom_src, dom_dst]
     vertex_coloring = [cls for cls in vertex_coloring if len(cls) > 0]
 
     try:
@@ -121,10 +156,8 @@ def _facility_orbits_from_structure(
 
         orbits = None
 
-        # Different pynauty builds expose different APIs; try common ones.
         if hasattr(pynauty, "autgrp"):
             res = pynauty.autgrp(g)
-            # common: res[3] is orbits list of length V
             if isinstance(res, tuple) and len(res) >= 4:
                 cand = res[3]
                 if isinstance(cand, list) and len(cand) == V and all(isinstance(x, int) for x in cand):
@@ -143,7 +176,7 @@ def _facility_orbits_from_structure(
         if orbits is None:
             return []
 
-        # Group facility vertices by orbit id
+        # group facility vertices by orbit id
         groups: Dict[int, List[int]] = {}
         for fi in range(m):
             oid = orbits[fi]
@@ -162,10 +195,6 @@ def _facility_orbits_from_structure(
 
 
 def _add_orbit_sb_chain(self, cnf, facility_orbits: List[List[int]]) -> None:
-    """
-    For each orbit [j1<j2<...<jk], enforce y[j1] >= y[j2] >= ... >= y[jk]
-    CNF: (-y[j_{t+1}] OR y[j_t])
-    """
     for orb in facility_orbits:
         if len(orb) < 2:
             continue
@@ -175,10 +204,6 @@ def _add_orbit_sb_chain(self, cnf, facility_orbits: List[List[int]]) -> None:
 
 
 def _add_orbit_sb_leader(self, cnf, facility_orbits: List[List[int]]) -> None:
-    """
-    Leader form: for orbit orb, leader=min(orb), enforce y[j] -> y[leader] for all j != leader
-    CNF: (-y[j] OR y[leader])
-    """
     for orb in facility_orbits:
         if len(orb) < 2:
             continue
@@ -202,13 +227,10 @@ def sb_coverage_order(
     forced_true: Optional[Set[int]] = None,
 ) -> None:
     """
-    Dominance-based ordering + (optional) orbit-based SB.
+    Dominance-based ordering + orbit-based SB computed on a structure that ALSO includes
+    the dominance implications, to avoid UNSAT from SB-composition.
 
-    Sound orbit-SB requires symmetry computed on a structure that includes ALL constraints
-    distinguishing facilities. Here we include:
-      - cover constraints (facility-demand incidence)
-      - pair clauses y(a) OR y(b) (both endpoints in candidates)
-      - forced TRUE facilities induced by pair clauses + Nd simplification (force markers)
+    This is the key fix for "dominance + orbit-SB" soundness.
     """
     eps = 1e-12
     pair_clauses = pair_clauses or []
@@ -223,15 +245,21 @@ def sb_coverage_order(
     for c in candidates:
         cover[c] = {u for u in active_demands if self.dist[c][u] <= radius + eps}
 
-    # dominance-based ordering
+    # ----- dominance-based ordering + record implication edges -----
+    dom_imps: List[Tuple[int, int]] = []
+
     for i, ci in enumerate(candidates):
         for cj in candidates[i + 1:]:
             if cover[ci] >= cover[cj] and cover[ci] != cover[cj]:
+                # y[cj] -> y[ci]
                 cnf.append([-self._y(cj), self._y(ci)])
+                dom_imps.append((cj, ci))
             elif cover[cj] >= cover[ci] and cover[cj] != cover[ci]:
+                # y[ci] -> y[cj]
                 cnf.append([-self._y(ci), self._y(cj)])
+                dom_imps.append((ci, cj))
 
-    # orbit-based SB
+    # ----- orbit-SB on FULL structure (cover + pairs + forced_true + dominance implications) -----
     if enable_orbit_sb and pynauty is not None:
         facility_orbits = _facility_orbits_from_structure(
             cover=cover,
@@ -239,6 +267,7 @@ def sb_coverage_order(
             active_demands=active_demands,
             pair_clauses=pair_clauses,
             forced_true=forced_true,
+            dom_imps=dom_imps,
         )
         if facility_orbits:
             if orbit_mode == "leader":
