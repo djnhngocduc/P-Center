@@ -428,15 +428,15 @@ class PCenterSAT:
                 pair_clauses.append((a, b))
 
 
-        # mask2cands, dom_out, dom_in = sb_coverage_order(
-        #     self, cnf, radius, candidates, demands, Nc
-        # )
-        if len(candidates) >= 2:
-            mask2cands = {0: list(candidates)}
-        else:
-            mask2cands = {}
-        dom_out = {}
-        dom_in = {}
+        mask2cands, dom_out, dom_in = sb_coverage_order(
+            self, cnf, radius, candidates, demands, Nc
+        )
+        # if len(candidates) >= 2:
+        #    mask2cands = {0: list(candidates)}
+        #else:
+        #    mask2cands = {}
+        #dom_out = {}
+        #dom_in = {}
 
         orbit_symmetry_breaking(
             self,
