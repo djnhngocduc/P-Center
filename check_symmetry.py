@@ -1,110 +1,150 @@
-# check_symmetry.py
+import argparse
+import json
 from collections import defaultdict
-from encoder import PCenterSAT
+from openpyxl import Workbook
 
-def load_tsplib_coords(path: str):
-    coords = []
-    in_section = False
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            s = line.strip()
-            if not s:
-                continue
-            u = s.upper()
-            if u.startswith("NODE_COORD_SECTION"):
-                in_section = True
-                continue
-            if u.startswith("EOF"):
-                break
-            if not in_section:
-                continue
-            parts = s.split()
-            if len(parts) >= 3:
-                x = float(parts[1])
-                y = float(parts[2])
-                coords.append((x, y))
-    return coords
+EPS = 1e-12
 
-def find_coverage_orbits(
-    inst: PCenterSAT,
-    radius: float,
-):
-    """
-    Phát hiện orbit logic theo tập phủ,
-    dùng CHÍNH reduction pipeline của encoder.py
-    """
 
-    # === DÙNG LẠI reduction gốc ===
+# --------------------------------------------------
+# Compute coverage symmetry
+# --------------------------------------------------
+
+def compute_coverage_symmetry(inst, radius):
     Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
 
     candidates = sorted((enabled_centers - Nc) - Nd)
-    dist = inst.dist
-    rad = radius + 1e-12
 
-    # -----------------------
-    # Active demands (y hệt sb.py)
-    # -----------------------
-    active_demands = []
-    if Nc:
-        for u in demands:
-            for c in Nc:
-                if dist[c][u] <= rad:
-                    break
-            else:
-                active_demands.append(u)
-    else:
-        active_demands = list(demands)
-
-    # -----------------------
-    # Build coverage mask
-    # -----------------------
-    mask2cands = defaultdict(list)
+    signature = defaultdict(list)
 
     for c in candidates:
-        mask = 0
-        row = dist[c]
-        for bit, u in enumerate(active_demands):
-            if row[u] <= rad:
-                mask |= (1 << bit)
-        mask2cands[mask].append(c)
+        covered = []
+        row = inst.dist[c]
+        for u in demands:
+            if row[u] <= radius + EPS:
+                covered.append(u)
 
-    # -----------------------
-    # Chỉ giữ orbit size >= 2
-    # -----------------------
-    orbits = {m: g for m, g in mask2cands.items() if len(g) >= 2}
+        signature[tuple(covered)].append(c)
 
-    return {
-        "radius": radius,
-        "Nc": len(Nc),
-        "Nd": len(Nd),
-        "candidates": len(candidates),
-        "active_demands": len(active_demands),
-        "num_orbits": len(orbits),
-        "nodes_in_orbits": sum(len(g) for g in orbits.values()),
-        "max_orbit_size": max((len(g) for g in orbits.values()), default=0),
+    sym_classes = {
+        k: v for k, v in signature.items()
+        if len(v) >= 2
     }
 
-def analyze_tsplib(tsplib_path, p):
-    coords = load_tsplib_coords(tsplib_path)
-    inst = PCenterSAT.from_coordinates(coords, p)
+    return sym_classes, Nc, Nd, candidates
 
-    print(f"\n=== Instance {tsplib_path} | n={inst.n} p={p} ===")
 
-    # duyệt 1 số bán kính đại diện
-    radii = inst.radii[::max(1, len(inst.radii)//2000)]
-    print(len(radii))
-    for R in radii:
-        info = find_coverage_orbits(inst, R)
+# --------------------------------------------------
+# Load instance EXACTLY like experiments.py
+# --------------------------------------------------
 
-        if info["num_orbits"] > 0:
-            print(
-                f"R={R:.2f} | "
-                f"active={info['active_demands']} | "
-                f"orbits={info['num_orbits']} | "
-                f"nodes={info['nodes_in_orbits']} | "
-                f"max_orbit={info['max_orbit_size']}"
-            )
+def load_instance_and_seed_radius(inst_desc):
+    """
+    Use the SAME pipeline as experiments.py
+    """
+    from experiments import load_instance
+
+    # load_instance returns (inst, seed_idx)
+    inst, seed_idx = load_instance(inst_desc)
+
+    # use the mapped radius from inst.radii
+    radius = inst.radii[seed_idx]
+
+    return inst, radius
+
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--instances", required=True)
+    parser.add_argument("--output", default="symmetry_stats.xlsx")
+    args = parser.parse_args()
+
+    with open(args.instances, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    wb = Workbook()
+    summary_ws = wb.active
+    summary_ws.title = "Summary"
+
+    summary_ws.append([
+        "Instance",
+        "p",
+        "Radius_used",
+        "#Candidates",
+        "#SymmetryClasses",
+        "TotalSymmetricNodes",
+        "MaxClassSize",
+        "SymmetryRatio"
+    ])
+
+    for inst_desc in data:
+        name = inst_desc["name"]
+        p = inst_desc["p"]
+
+        print(f"[PROCESS] {name}, p={p}")
+
+        # ---- identical pipeline to experiments
+        inst, radius = load_instance_and_seed_radius(inst_desc)
+
+        print(f"  mapped radius = {radius}")
+
+        sym_classes, Nc, Nd, candidates = compute_coverage_symmetry(
+            inst, radius
+        )
+
+        total_sym_nodes = sum(len(v) for v in sym_classes.values())
+        max_class = max((len(v) for v in sym_classes.values()), default=0)
+        num_classes = len(sym_classes)
+        num_candidates = len(candidates)
+
+        symmetry_ratio = (
+            total_sym_nodes / num_candidates
+            if num_candidates > 0 else 0
+        )
+
+        # ---- Summary row
+        summary_ws.append([
+            name,
+            p,
+            radius,
+            num_candidates,
+            num_classes,
+            total_sym_nodes,
+            max_class,
+            symmetry_ratio
+        ])
+
+        # ---- Detail sheet
+        sheet_name = f"{name}_p{p}"
+        ws = wb.create_sheet(title=sheet_name[:31])
+
+        ws.append(["Instance", name])
+        ws.append(["p", p])
+        ws.append(["Radius_used", radius])
+        ws.append(["|Nc|", len(Nc)])
+        ws.append(["|Nd|", len(Nd)])
+        ws.append(["#Candidates", num_candidates])
+        ws.append(["#SymmetryClasses", num_classes])
+        ws.append(["TotalSymmetricNodes", total_sym_nodes])
+        ws.append(["MaxClassSize", max_class])
+        ws.append([])
+
+        ws.append(["ClassID", "ClassSize", "Centers"])
+
+        for idx, centers in enumerate(sym_classes.values(), start=1):
+            ws.append([
+                idx,
+                len(centers),
+                ",".join(map(str, centers))
+            ])
+
+    wb.save(args.output)
+    print(f"[DONE] Excel written to {args.output}")
 
 
 if __name__ == "__main__":
-    analyze_tsplib("dataset/TSPLIB/u1060.tsp", p=150)
+    main()
