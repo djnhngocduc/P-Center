@@ -38,9 +38,44 @@ def compute_identical_coverage_symmetry(inst, radius):
 # AUTOMORPHISM SYMMETRY (pynauty)
 # --------------------------------------------------
 
+def _extract_orbit_ids_from_autgrp_result(result):
+    """
+    pynauty.autgrp(g) thường trả tuple dạng:
+      (generators, grpsize1, grpsize2, orbits, numorbits)
+    => phần tử cuối (numorbits) là int, còn 'orbits' (list/iterable) nằm ở -2.
+
+    Nhưng để an toàn theo nhiều version/fork:
+    - Nếu result[-1] là int -> lấy result[-2]
+    - Nếu result[-1] iterable -> lấy result[-1]
+    - Nếu vẫn không đúng -> raise để dễ debug.
+    """
+    if not isinstance(result, (tuple, list)) or len(result) == 0:
+        raise TypeError(f"autgrp returned unexpected type/value: {type(result)} {result!r}")
+
+    last = result[-1]
+
+    # Trường hợp phổ biến: last là numorbits (int)
+    if isinstance(last, int):
+        if len(result) < 2:
+            raise TypeError(f"autgrp returned only an int: {result!r}")
+        orbit_ids = result[-2]
+    else:
+        orbit_ids = last
+
+    # orbit_ids phải iterable (list/tuple)
+    if isinstance(orbit_ids, int):
+        raise TypeError(
+            "orbit_ids is still int after extraction. "
+            f"autgrp returned: {result!r}"
+        )
+
+    # Một số version trả orbits dạng list length = nVertices,
+    # mỗi phần tử là orbit-id (int)
+    return orbit_ids
+
+
 def compute_automorphism_symmetry(inst, radius):
     import pynauty
-    from collections import defaultdict
 
     Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
     candidates = sorted(enabled_centers - Nc - Nd)
@@ -78,25 +113,21 @@ def compute_automorphism_symmetry(inst, radius):
         vertex_coloring=coloring
     )
 
-    # ===== universal safe extraction =====
     result = pynauty.autgrp(g)
-    orbit_ids = result[-1]   # luôn nằm ở cuối
+    orbit_ids = _extract_orbit_ids_from_autgrp_result(result)
 
     orbit_dict = defaultdict(list)
     for v, oid in enumerate(orbit_ids):
         orbit_dict[oid].append(v)
 
     auto_classes = []
-
     for orbit in orbit_dict.values():
         centers = [candidates[v] for v in orbit if v < nC]
         if len(centers) >= 2:
             auto_classes.append(sorted(centers))
 
     auto_classes.sort()
-
     return auto_classes
-
 
 
 # --------------------------------------------------
