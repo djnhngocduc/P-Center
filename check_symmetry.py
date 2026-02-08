@@ -68,8 +68,8 @@ def compute_automorphism_symmetry(inst, radius):
                 adj[ui].append(ci)
 
     coloring = [
-        set(range(0, nC)),               # centers
-        set(range(nC, nC + nD))          # demands
+        set(range(0, nC)),
+        set(range(nC, nC + nD))
     ]
 
     g = pynauty.Graph(
@@ -78,10 +78,10 @@ def compute_automorphism_symmetry(inst, radius):
         vertex_coloring=coloring
     )
 
-    # ===== FIX CHÍNH Ở ĐÂY =====
-    _, _, _, orbit_ids = pynauty.autgrp(g)
+    # ===== universal safe extraction =====
+    result = pynauty.autgrp(g)
+    orbit_ids = result[-1]   # luôn nằm ở cuối
 
-    # orbit_ids[v] = orbit index of vertex v
     orbit_dict = defaultdict(list)
     for v, oid in enumerate(orbit_ids):
         orbit_dict[oid].append(v)
@@ -96,6 +96,7 @@ def compute_automorphism_symmetry(inst, radius):
     auto_classes.sort()
 
     return auto_classes
+
 
 
 # --------------------------------------------------
