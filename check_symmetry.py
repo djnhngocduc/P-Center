@@ -40,16 +40,20 @@ def compute_identical_coverage_symmetry(inst, radius):
 
 def compute_automorphism_symmetry(inst, radius):
     import pynauty
+    from collections import defaultdict
 
     Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
     candidates = sorted(enabled_centers - Nc - Nd)
 
-    center_index = {c: i for i, c in enumerate(candidates)}
-    demand_index = {u: i for i, u in enumerate(demands)}
-
     nC = len(candidates)
     nD = len(demands)
     total_vertices = nC + nD
+
+    if total_vertices == 0:
+        return []
+
+    center_index = {c: i for i, c in enumerate(candidates)}
+    demand_index = {u: i for i, u in enumerate(demands)}
 
     adj = {i: [] for i in range(total_vertices)}
 
@@ -74,14 +78,22 @@ def compute_automorphism_symmetry(inst, radius):
         vertex_coloring=coloring
     )
 
-    aut = pynauty.autgrp(g)
-    orbits = aut[3]
+    # ===== FIX CHÍNH Ở ĐÂY =====
+    _, _, _, orbit_ids = pynauty.autgrp(g)
+
+    # orbit_ids[v] = orbit index of vertex v
+    orbit_dict = defaultdict(list)
+    for v, oid in enumerate(orbit_ids):
+        orbit_dict[oid].append(v)
 
     auto_classes = []
-    for orbit in orbits:
+
+    for orbit in orbit_dict.values():
         centers = [candidates[v] for v in orbit if v < nC]
         if len(centers) >= 2:
             auto_classes.append(sorted(centers))
+
+    auto_classes.sort()
 
     return auto_classes
 
