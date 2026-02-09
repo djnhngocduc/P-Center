@@ -12,7 +12,8 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-from sb import sb_coverage_order, orbit_symmetry_breaking
+# from sb import sb_coverage_order, orbit_symmetry_breaking
+from sb import automorphism_symmetry_breaking
 
 
 _PYSAT_CNF_LOCK = RLock()
@@ -428,26 +429,25 @@ class PCenterSAT:
                 pair_clauses.append((a, b))
 
 
-        mask2cands, dom_out, dom_in = sb_coverage_order(
-            self, cnf, radius, candidates, demands, Nc
-        )
-        # if len(candidates) >= 2:
-        #    mask2cands = {0: list(candidates)}
-        #else:
-        #    mask2cands = {}
-        #dom_out = {}
-        #dom_in = {}
+        # mask2cands, dom_out, dom_in = sb_coverage_order(
+        #     self, cnf, radius, candidates, demands, Nc
+        # )
 
-        orbit_symmetry_breaking(
+        # orbit_symmetry_breaking(
+        #     self,
+        #     cnf,
+        #     mask2cands=mask2cands,
+        #     dom_out=dom_out,
+        #     dom_in=dom_in,
+        #     pair_clauses=pair_clauses,
+        #     orbit_mode="chain",   # hoặc "leader"
+        # )
+        automorphism_symmetry_breaking(
             self,
             cnf,
-            mask2cands=mask2cands,
-            dom_out=dom_out,
-            dom_in=dom_in,
-            pair_clauses=pair_clauses,
-            orbit_mode="chain",   # hoặc "leader"
+            radius=radius,
+            mode="chain",  # hoặc "leader"
         )
-
 
         bound = self.p - len(Nc)      
         if bound < 0:
