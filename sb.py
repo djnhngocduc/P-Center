@@ -10,8 +10,7 @@ EPS = 1e-12
 # IDENTICAL COVERAGE SYMMETRY
 # --------------------------------------------------
 
-def compute_identical_coverage_symmetry(inst, radius):
-    Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
+def compute_identical_coverage_symmetry(inst, radius, Nc, Nd, enabled_centers, demands):
 
     candidates = sorted(enabled_centers - Nc - Nd)
 
@@ -31,7 +30,7 @@ def compute_identical_coverage_symmetry(inst, radius):
         if len(v) >= 2
     ]
 
-    return sym_classes, Nc, Nd, candidates
+    return sym_classes, candidates
 
 
 # --------------------------------------------------
@@ -74,10 +73,9 @@ def _extract_orbit_ids_from_autgrp_result(result):
     return orbit_ids
 
 
-def compute_automorphism_symmetry(inst, radius):
+def compute_automorphism_symmetry(inst, radius, Nc, Nd, enabled_centers, demands):
     import pynauty
 
-    Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
     candidates = sorted(enabled_centers - Nc - Nd)
 
     nC = len(candidates)
@@ -137,6 +135,7 @@ def automorphism_symmetry_breaking(
     self,
     cnf,
     radius: float,
+    Nc, Nd, enabled_centers, demands,
     mode: str = "chain",   # "chain" or "leader"
 ):
     """
@@ -146,7 +145,7 @@ def automorphism_symmetry_breaking(
 
     ylit = self.y_lit_all
 
-    orbits = compute_automorphism_symmetry(self, radius)
+    orbits = compute_automorphism_symmetry(self, radius, Nc, Nd, enabled_centers, demands)
 
     if not orbits:
         return
@@ -199,12 +198,13 @@ def main():
         inst, radius = load_instance_and_seed_radius(inst_desc)
         print(f"  mapped radius = {radius}")
 
+        Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
+
         # =============================
         # IDENTICAL
         # =============================
 
-        identical_classes, Nc, Nd, candidates = \
-            compute_identical_coverage_symmetry(inst, radius)
+        identical_classes, candidates = compute_identical_coverage_symmetry(inst, radius, Nc, Nd, enabled_centers, demands)
 
         num_candidates = len(candidates)
         total_sym_nodes = sum(len(c) for c in identical_classes)
@@ -243,7 +243,7 @@ def main():
         # AUTOMORPHISM
         # =============================
 
-        auto_classes = compute_automorphism_symmetry(inst, radius)
+        auto_classes = compute_automorphism_symmetry(inst, radius, Nc, Nd, enabled_centers, demands)
 
         total_auto_nodes = sum(len(c) for c in auto_classes)
         max_auto_class = max((len(c) for c in auto_classes), default=0)

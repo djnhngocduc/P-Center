@@ -421,12 +421,12 @@ class PCenterSAT:
             cnf.append(allowed)
 
         # cnf_extra contains clauses [y(a), y(b)] where y(j)=1+j
-        pair_clauses = []
-        for cl in cnf_extra:
-            if len(cl) == 2 and cl[0] > 0 and cl[1] > 0:
-                a = cl[0] - 1
-                b = cl[1] - 1
-                pair_clauses.append((a, b))
+        # pair_clauses = []
+        # for cl in cnf_extra:
+        #     if len(cl) == 2 and cl[0] > 0 and cl[1] > 0:
+        #         a = cl[0] - 1
+        #         b = cl[1] - 1
+        #         pair_clauses.append((a, b))
 
 
         # mask2cands, dom_out, dom_in = sb_coverage_order(
@@ -445,7 +445,8 @@ class PCenterSAT:
         automorphism_symmetry_breaking(
             self,
             cnf,
-            radius=radius,
+            radius,
+            Nc, Nd, enabled_centers, demands,
             mode="chain",  # hoặc "leader"
         )
 
