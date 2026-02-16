@@ -2,6 +2,7 @@ import argparse
 import json
 import csv
 from collections import defaultdict
+from reduction import compute_reduction
 
 EPS = 1e-12
 
@@ -198,7 +199,7 @@ def main():
         inst, radius = load_instance_and_seed_radius(inst_desc)
         print(f"  mapped radius = {radius}")
 
-        Nc, Nd, enabled_centers, demands, _ = inst.compute_reduction(radius)
+        Nc, Nd, enabled_centers, demands, _ = compute_reduction(inst.dist, inst.n, radius)
 
         # =============================
         # IDENTICAL
