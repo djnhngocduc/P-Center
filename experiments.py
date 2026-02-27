@@ -18,18 +18,6 @@ import csv
 import resource
 import atexit, shutil
 import traceback
-import re 
-
-_WIN_RE = re.compile(r"The winner is\s+([A-Za-z0-9_+\-]+)\(")
-
-def _extract_painless_winner(stdout: str) -> str | None:
-    winner = None
-    for line in stdout.splitlines():
-        if "The winner is" in line:
-            m = _WIN_RE.search(line)
-            if m:
-                winner = m.group(1) 
-    return winner
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
@@ -43,13 +31,6 @@ EXTERNAL_SOLVERS = {
     "sparrow2riss": (
         os.path.join(BASE_DIR, "solvers", "Sparrow2Riss-2018", "bin", "starexec_run_default"),
         []
-    ),
-    "painless": (
-        os.path.join(BASE_DIR, "solvers", "painless", "build", "release", "painless_release"),
-        [
-            "-c=2",
-            "-solver=kM"
-        ]
     ),
     "kissat": (
         os.path.join(BASE_DIR, "solvers", "kissat", "build", "kissat"),
@@ -250,17 +231,14 @@ def search_min_radius_parallel(
 ):
     radii = inst.radii
     nR = len(radii)
-    start_wall = time.time()
     if nR == 0:
-        return "infeasible", None, 0.0, None, None, None, None, None
+        return "infeasible", None, None, None, None, None, None, None
 
     decided = {}
     best_nvars = None
     best_nclauses = None
     sat_solutions = {}
     sat_cpu_time = {}
-    sat_wall_time = {}
-    sat_winner = {}
     sat_nvars = {}
     sat_nclauses = {}
 
@@ -320,7 +298,7 @@ def search_min_radius_parallel(
             for fut in as_completed(futs):
                 k = futs[fut]
                 try:
-                    idx, R, status, wall_sec, cpu_sec, nvars, nclauses, centers, winner = fut.result()
+                    idx, R, status, cpu_sec, nvars, nclauses, centers  = fut.result()
                 except Exception:
                     tb = traceback.format_exc()
                     print(
@@ -330,9 +308,8 @@ def search_min_radius_parallel(
                     )
 
                     idx, R = k, radii[k]
-                    status, wall_sec, cpu_sec, nvars, nclauses, centers, winner = (
+                    status, cpu_sec, nvars, nclauses, centers = (
                         "error",
-                        0.0,
                         0.0,
                         None,
                         None,
@@ -341,7 +318,7 @@ def search_min_radius_parallel(
                     )
                 print(
                     f"[TASK-DONE] idx={idx} R={R} status={status} "
-                    f"wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
+                    f"cpu={cpu_sec:.6f}s",
                     flush=True
                 )
 
@@ -350,8 +327,6 @@ def search_min_radius_parallel(
                 if status == "sat":
                     sat_solutions[idx] = centers
                     sat_cpu_time[idx] = cpu_sec
-                    sat_wall_time[idx] = wall_sec
-                    sat_winner[idx] = winner
 
                     sat_nvars[idx] = nvars
                     sat_nclauses[idx] = nclauses
@@ -398,12 +373,11 @@ def search_min_radius_parallel(
                     futs2 = launch_batch(ex, [nxt])
                     fut2 = next(iter(futs2.keys()))
                     try:
-                        idx2, R2, status2, wall_sec2, cpu_sec2, nv2, nc2, centers2, winner2 = fut2.result()
+                        idx2, R2, status2, cpu_sec2, nv2, nc2, centers2 = fut2.result()
                     except Exception:
                         idx2, R2 = nxt, radii[nxt]
-                        status2, wall_sec2, cpu_sec2, nv2, nc2, centers2, winner2 = (
+                        status2, cpu_sec2, nv2, nc2, centers2 = (
                             "timeout",
-                            0.0,
                             0.0,
                             None,
                             None,
@@ -412,7 +386,7 @@ def search_min_radius_parallel(
                         )
 
                     print(
-                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2} wall={wall_sec2:.6f}s cpu={cpu_sec2:.6f}s",
+                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2} cpu={cpu_sec2:.6f}s",
                         flush=True
                     )
 
@@ -424,8 +398,6 @@ def search_min_radius_parallel(
                     elif status2 == "sat":
                         sat_solutions[nxt] = centers2
                         sat_cpu_time[nxt] = cpu_sec2
-                        sat_wall_time[nxt] = wall_sec2
-                        sat_winner[nxt] = winner2
 
                         sat_nvars[nxt] = nv2
                         sat_nclauses[nxt] = nc2
@@ -452,8 +424,6 @@ def search_min_radius_parallel(
 
             i = j + 1
 
-    elapsed = time.time() - start_wall
-
     if best_sat_idx is None:
         if sat_solutions:
             best_sat_idx = max(sat_solutions.keys())
@@ -467,32 +437,27 @@ def search_min_radius_parallel(
                 "[RESULT] infeasible (no SAT found at any radius)",
                 flush=True
             )
-            return "infeasible", None, elapsed, best_nvars, best_nclauses, None, None, None, None
+            return "infeasible", None, best_nvars, best_nclauses, None, None, None, None
 
     best_centers = sat_solutions.get(best_sat_idx, None)
     best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
-    best_sat_wall = sat_wall_time.get(best_sat_idx, None)
 
     print(
         f"[RESULT] status=OK best_idx={best_sat_idx} best_R={radii[best_sat_idx]} "
-        f"elapsed_wall={elapsed:.6f}s cpu={best_sat_cpu} wall={best_sat_wall}",
+        f"cpu={best_sat_cpu}",
         flush=True
     )
 
     best_nvars = sat_nvars.get(best_sat_idx, None)
     best_nclauses = sat_nclauses.get(best_sat_idx, None)
-    best_winner = sat_winner.get(best_sat_idx, None)
 
     return (
         "OK",
         radii[best_sat_idx],
-        elapsed,
         best_nvars,
         best_nclauses,
         best_centers,
-        best_sat_cpu,
-        best_sat_wall,
-        best_winner,
+        best_sat_cpu
     )
 
 
@@ -522,7 +487,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             file=sys.stderr,
             flush=True
         )
-        return "error", 0.0, 0.0, None, None
+        return "error", 0.0, 0.0, None
 
     base_tmp = _LOCAL_TMPDIR if _LOCAL_TMPDIR is not None else tempfile.gettempdir()
 
@@ -547,7 +512,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
     else:
         cmd = [bin_path] + extra_args + [cnf_path]
 
-    t0 = time.perf_counter()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -574,7 +538,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
         stdout, stderr = proc.communicate(
             timeout=time_limit if (time_limit and time_limit > 0) else None
         )
-        t1 = time.perf_counter()
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
@@ -586,15 +549,13 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
         except Exception:
             pass
         print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        return "timeout", (time_limit if time_limit else 0.0), (time_limit if time_limit else 0.0), None, None
+        return "timeout", (time_limit if time_limit else 0.0), (time_limit if time_limit else 0.0), None
     finally:
         try:
             if os.path.exists(cnf_path):
                 os.remove(cnf_path)
         except Exception:
             pass
-
-    wall_time = t1 - t0
 
     status = None
     model_lits = []
@@ -638,14 +599,6 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
                     pass
         if user_t is not None and sys_t is not None:
             cpu_time = user_t + sys_t
-        
-    if cpu_time is None:
-        cpu_time = wall_time
-            
-
-    if proc.returncode not in (0, 10, 20):
-        print(f"[SOLVER-STDERR]\n{stderr}", flush=True)
-        print(f"[SOLVER-STDOUT]\n{stdout}", flush=True)
 
     if status is None:
         if model_lits:
@@ -655,17 +608,12 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     if status == "sat" and not model_lits:
         print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
-        return "error", wall_time, cpu_time, None, None
-    
-    winner = None 
-    if solver_name == "painless":
-        winner = _extract_painless_winner(stdout)
+        return "error", cpu_time, None
 
-    return status, wall_time, cpu_time, (model_lits if status == "sat" else None), winner
+    return status, cpu_time, (model_lits if status == "sat" else None)
 
 
 def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
-    winner = None
     pid = os.getpid()
     print(
         f"[WORKER-START] pid={pid} idx={idx} R={radius} "
@@ -693,7 +641,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 f"-> UNSAT(by reduction)",
                 flush=True
             )
-            return idx, radius, "unsat", 0.0, 0.0, None, None, None, None
+            return idx, radius, "unsat", 0.0, None, None, None
 
         if solver_name in EXTERNAL_SOLVERS:
             cancel_ev = None
@@ -703,7 +651,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             except Exception:
                 cancel_ev = None
 
-            status, wall_sec, cpu_sec, model, winner = _run_external_solver(
+            status, cpu_sec, model = _run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
@@ -716,18 +664,18 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             if status in ("timeout", "error"):
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> {status.upper()} wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
+                    f"-> {status.upper()} cpu={cpu_sec:.6f}s",
                     flush=True
                 )
-                return idx, radius, status, wall_sec, cpu_sec, nvars, nclauses, None, winner
+                return idx, radius, status, cpu_sec, nvars, nclauses, None
 
             if status == "unsat":
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> UNSAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
+                    f"-> UNSAT cpu={cpu_sec:.6f}s",
                     flush=True
                 )
-                return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None, winner
+                return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
 
             model_set = set(model or [])
             y_vars = varmap.get("y", [])
@@ -741,10 +689,10 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             centers = sorted(chosen | Nc)
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> SAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s centers={centers}",
+                f"-> SAT cpu={cpu_sec:.6f}s centers={centers}",
                 flush=True
             )
-            return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers, winner
+            return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
         
         with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
             cancel_ev = None
@@ -771,19 +719,14 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
                     cpu0 = _cpu_self_seconds()
-                    t0 = time.perf_counter()
                     sat = solver.solve_limited(expect_interrupt=True)
                     cpu1 = _cpu_self_seconds()
-                    t1 = time.perf_counter()
 
                 else:
                     cpu0 = _cpu_self_seconds()
-                    t0 = time.perf_counter()
                     sat = solver.solve()
                     cpu1 = _cpu_self_seconds()
-                    t1 = time.perf_counter()
 
-                wall_sec = t1 - t0
                 cpu_sec = cpu1 - cpu0
 
                 nvars = cnf.nv
@@ -792,26 +735,26 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 if sat is None:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
+                        f"-> TIMEOUT cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None, winner
+                    return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
                 if not sat:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> UNSAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
+                        f"-> UNSAT cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return idx, radius, "unsat", wall_sec, cpu_sec, nvars, nclauses, None, winner
+                    return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
 
                 model = solver.get_model() or []
                 if not model:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT(no model) wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s",
+                        f"-> TIMEOUT(no model) cpu={cpu_sec:.6f}s",
                         flush=True
                     )
-                    return idx, radius, "timeout", wall_sec, cpu_sec, nvars, nclauses, None, winner
+                    return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
 
                 model_set = set(model)
                 y_vars = varmap.get("y", [])
@@ -821,10 +764,10 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 centers = sorted(chosen | Nc)
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> SAT wall={wall_sec:.6f}s cpu={cpu_sec:.6f}s centers={centers}",
+                    f"-> SAT cpu={cpu_sec:.6f}s centers={centers}",
                     flush=True
                 )
-                return idx, radius, "sat", wall_sec, cpu_sec, nvars, nclauses, centers, winner
+                return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
             finally:
                 if timer:
                     timer.cancel()
@@ -836,7 +779,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             file=sys.stderr,
             flush=True
         )
-        return idx, radius, "error", 0.0, 0.0, None, None, None, None
+        return idx, radius, "error", 0.0, None, None, None
 
 
 # CLI & Runner
@@ -857,7 +800,7 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "painless", "glucose4", "kissat"],
+        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat"],
         help="SAT solvers to use",
     )
     ap.add_argument(
@@ -875,7 +818,7 @@ def parse_args():
     ap.add_argument(
         "--out",
         type=str,
-        default="results.csv",
+        default=os.path.join("results", "results", "results.csv"),
         help="CSV output path",
     )
     return ap.parse_args()
@@ -908,7 +851,7 @@ def run_experiment(
                     f"encoding={encoding} solver={solver_name}",
                     flush=True
                 )
-                status, best_radius, elapsed_time, nvars, nclauses, centers, best_sat_cpu, best_sat_wall, winner = search_min_radius_parallel(
+                status, best_radius, nvars, nclauses, centers, best_sat_cpu = search_min_radius_parallel(
                     inst,
                     encoding,
                     solver_name,
@@ -922,7 +865,7 @@ def run_experiment(
                 print(
                     f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"status={status} best_radius={best_radius} "
-                    f"elapsed_wall={elapsed_time:.6f}s wall={best_sat_wall} cpu={best_sat_cpu}",
+                    f"cpu={best_sat_cpu}",
                     flush=True
                 )
 
@@ -936,13 +879,10 @@ def run_experiment(
                         "run_id": run_id + 1,
                         "status": status,
                         "best_radius": best_radius if best_radius is not None else None,
-                        "time_sec": elapsed_time,
                         "cpu": best_sat_cpu,
-                        "wall": best_sat_wall,
                         "nvars": nvars,
                         "nclauses": nclauses,
                         "centers": json.dumps(centers if centers is not None else []),
-                        "winner": winner,
                     }
                 )
 
@@ -950,6 +890,10 @@ def run_experiment(
 
     return results
 
+def sort_key(enc_sol):
+    enc, sol = enc_sol
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 4, "kissat": 5}
+    return solver_rank.get(sol, 99), sol, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
     cfg_runs = defaultdict(list)
@@ -974,11 +918,6 @@ def print_instance_summary_for_console(all_results_for_inst):
         return
 
     gR = min(cfg_bestR.values())
-
-    def sort_key(enc_sol):
-        enc, sol = enc_sol
-        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "painless": 3, "glucose4": 4, "kissat": 5}
-        return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(cfg_runs.keys(), key=sort_key)
 
@@ -1005,36 +944,10 @@ def print_instance_summary_for_console(all_results_for_inst):
                 f"radius={gR} cpu_mean=- "
             )
 
-        walls = [
-            x.get("wall")
-            for x in runs
-            if x.get("status") == "OK"
-            and x.get("best_radius") == gR
-            and x.get("wall") is not None
-        ]
-
-        if walls:
-            mean_wall = _stats.mean(walls)
-            print(
-                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
-                f"radius={gR} wall_mean={mean_wall:.3f}s "
-            )
-        else:
-            print(
-                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
-                f"radius={gR} wall_mean=- "
-            )
-
 
 def write_paper_table(all_results, out_csv_path: str):
     def method_label(solver: str, enc: str) -> str:
         return f"{solver} {enc}"
-    
-    def col_cpu(method: str) -> str:
-        return f"{method} cpu"
-
-    def col_wall(method: str) -> str:
-        return f"{method} wall"
 
     cfg_runs = defaultdict(list)
     all_instances = set()
@@ -1068,7 +981,6 @@ def write_paper_table(all_results, out_csv_path: str):
         if (inst, n, p) not in global_bestR or R < global_bestR[(inst, n, p)]:
             global_bestR[(inst, n, p)] = R
 
-    walls_at_global = defaultdict(list)
     cpus_at_global = defaultdict(list)
     for (inst, n, p, enc, sol), runs in cfg_runs.items():
         gR = global_bestR.get((inst, n, p))
@@ -1084,17 +996,9 @@ def write_paper_table(all_results, out_csv_path: str):
                 sizes_at_global[key_size] = x.get("nvars"), x.get("nclauses")
             
             cpu_v = x.get("cpu")
-            wall_v = x.get("wall")
 
             if cpu_v is not None:
                 cpus_at_global[(inst, n, p, enc, sol)].append(cpu_v)
-            if wall_v is not None:
-                walls_at_global[(inst, n, p, enc, sol)].append(wall_v)
-
-    def sort_key(enc_sol):
-        enc, sol = enc_sol
-        solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "painless": 3, "glucose4": 4, "kissat": 5}
-        return solver_rank.get(sol, 99), sol, enc
 
     method_cols = sorted(methods_seen, key=sort_key)
     encodings_only = sorted({enc for (enc, _) in methods_seen})
@@ -1106,13 +1010,11 @@ def write_paper_table(all_results, out_csv_path: str):
 
     for (enc, sol) in method_cols:
         m = method_label(solver=sol, enc=enc)
-        header.append(col_wall(m))
-        header.append(col_cpu(m))
+        header.append(m)
 
     rows = []
 
-    solved_wall = {col_wall(method_label(sol, enc)): [] for (enc, sol) in method_cols}
-    solved_cpu = {col_cpu(method_label(sol, enc)): [] for (enc, sol) in method_cols}
+    solved_cpu = {method_label(sol, enc): [] for (enc, sol) in method_cols}
 
     for (inst, n, p) in sorted(
         all_instances, key=lambda x: (str(x[0]), x[1], x[2])
@@ -1132,25 +1034,15 @@ def write_paper_table(all_results, out_csv_path: str):
 
         for (enc, sol) in method_cols:
             m = method_label(solver=sol, enc=enc)
-            c_cpu = col_cpu(m)
-            c_wall = col_wall(m)
 
             ts_cpu = cpus_at_global.get((inst, n, p, enc, sol), [])
-            ts_wall = walls_at_global.get((inst, n, p, enc, sol), [])
 
             if ts_cpu:
                 mean_cpu = _stats.mean(ts_cpu)
-                row[c_cpu] = f"{mean_cpu:.3f}"
-                solved_cpu[c_cpu].append(mean_cpu)
+                row[m] = f"{mean_cpu:.3f}"
+                solved_cpu[m].append(mean_cpu)
             else:
-                row[c_cpu] = "-"
-
-            if ts_wall:
-                mean_wall = _stats.mean(ts_wall)
-                row[c_wall] = f"{mean_wall:.3f}"
-                solved_wall[c_wall].append(mean_wall)
-            else:
-                row[c_wall] = "-"
+                row[m] = "-"
 
         rows.append(row)
 
@@ -1159,17 +1051,11 @@ def write_paper_table(all_results, out_csv_path: str):
 
     for (enc, sol) in method_cols:
         m = method_label(solver=sol, enc=enc)
-        c_wall = col_wall(m)
-        c_cpu = col_cpu(m)
 
-        lst_wall = solved_wall.get(c_wall, [])
-        lst_cpu = solved_cpu.get(c_cpu, [])
+        lst_cpu = solved_cpu.get(m, [])
 
-        footer_num[c_wall] = str(len(lst_wall)) if lst_wall else "0"
-        footer_avg[c_wall] = f"{_stats.mean(lst_wall):.3f}" if lst_wall else "-"
-
-        footer_num[c_cpu] = str(len(lst_cpu)) if lst_cpu else "0"
-        footer_avg[c_cpu] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
+        footer_num[m] = str(len(lst_cpu)) if lst_cpu else "0"
+        footer_avg[m] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
 
     rows.append(footer_num)
     rows.append(footer_avg)
@@ -1179,79 +1065,6 @@ def write_paper_table(all_results, out_csv_path: str):
         w.writeheader()
         for r in rows:
             w.writerow(r)
-
-def list_instances_where_painless_wins(all_results, metric="cpu", tie_break="wall"):
-    by_inst = defaultdict(list)
-    for r in all_results:
-        by_inst[(r["instance"], r["n"], r["p"])].append(r)
-
-    wins = []
-
-    for (inst, n, p), rows in sorted(by_inst.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
-        feas = [x["best_radius"] for x in rows if x.get("best_radius") is not None]
-        if not feas:
-            continue
-        gR = min(feas)
-
-        cand = [
-            x for x in rows
-            if x.get("status") == "OK"
-            and x.get("best_radius") == gR
-            and x.get(metric) is not None
-        ]
-        if not cand:
-            continue
-
-        best_by_solver = {}
-        for x in cand:
-            sol = x["solver"]
-            t = x[metric]
-            tb = x.get(tie_break)
-            key = (t, tb if tb is not None else float("inf"), x.get("encoding", ""))
-            if sol not in best_by_solver or key < best_by_solver[sol]["key"]:
-                best_by_solver[sol] = {"row": x, "key": key}
-
-        best_list = []
-        for sol, v in best_by_solver.items():
-            best_list.append((v["key"], sol, v["row"]))
-        best_list.sort(key=lambda z: (z[0][0], z[0][1], z[1]))
-
-        _, winner_solver, winner_row = best_list[0]
-        if winner_solver == "painless":
-            wins.append({
-                "instance": inst,
-                "n": n,
-                "p": p,
-                "radius": gR,
-                "winner": "painless",
-                "encoding": winner_row.get("encoding"),
-                metric: winner_row.get(metric),
-                tie_break: winner_row.get(tie_break),
-            })
-
-    return wins
-
-def print_painless_internal_winners(all_results):
-    rows = [
-        r for r in all_results
-        if r.get("solver") == "painless"
-        and r.get("status") == "OK"
-        and r.get("best_radius") is not None
-    ]
-
-    if not rows:
-        print("\nNo painless OK results.")
-        return
-
-    print("\n=== Painless internal winners at BEST radius (from -c=8) ===")
-    rows.sort(key=lambda r: (r["instance"], r.get("encoding", ""), r["best_radius"]))
-
-    for r in rows:
-        print(
-            f"instance={r['instance']} enc={r.get('encoding')} "
-            f"R*={r['best_radius']} winner={r.get('winner')}"
-        )
-
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
@@ -1292,5 +1105,4 @@ if __name__ == "__main__":
 
     if all_results:
         write_paper_table(all_results, args.out)
-        print_painless_internal_winners(all_results)
 

@@ -1,115 +1,115 @@
 import argparse
 import json
 import csv
-from collections import defaultdict
 from reduction import compute_reduction
+from collections import defaultdict
 
 EPS = 1e-12
 
 
 # --------------------------------------------------
-# IDENTICAL COVERAGE SYMMETRY
-# --------------------------------------------------
-
-def compute_identical_coverage_symmetry(inst, radius, Nc, Nd, enabled_centers, demands):
-
-    candidates = sorted(enabled_centers - Nc - Nd)
-
-    signature = defaultdict(list)
-
-    for c in candidates:
-        covered = []
-        row = inst.dist[c]
-        for u in demands:
-            if row[u] <= radius + EPS:
-                covered.append(u)
-
-        signature[tuple(covered)].append(c)
-
-    sym_classes = [
-        sorted(v) for v in signature.values()
-        if len(v) >= 2
-    ]
-
-    return sym_classes, candidates
-
-
-# --------------------------------------------------
-# AUTOMORPHISM SYMMETRY (pynauty)
+# Extract orbit ids safely from pynauty.autgrp
 # --------------------------------------------------
 
 def _extract_orbit_ids_from_autgrp_result(result):
-    """
-    pynauty.autgrp(g) thường trả tuple dạng:
-      (generators, grpsize1, grpsize2, orbits, numorbits)
-    => phần tử cuối (numorbits) là int, còn 'orbits' (list/iterable) nằm ở -2.
-
-    Nhưng để an toàn theo nhiều version/fork:
-    - Nếu result[-1] là int -> lấy result[-2]
-    - Nếu result[-1] iterable -> lấy result[-1]
-    - Nếu vẫn không đúng -> raise để dễ debug.
-    """
     if not isinstance(result, (tuple, list)) or len(result) == 0:
-        raise TypeError(f"autgrp returned unexpected type/value: {type(result)} {result!r}")
+        raise TypeError(f"autgrp returned unexpected: {type(result)} {result!r}")
 
     last = result[-1]
 
-    # Trường hợp phổ biến: last là numorbits (int)
     if isinstance(last, int):
         if len(result) < 2:
-            raise TypeError(f"autgrp returned only an int: {result!r}")
+            raise TypeError(f"autgrp malformed: {result!r}")
         orbit_ids = result[-2]
     else:
         orbit_ids = last
 
-    # orbit_ids phải iterable (list/tuple)
     if isinstance(orbit_ids, int):
-        raise TypeError(
-            "orbit_ids is still int after extraction. "
-            f"autgrp returned: {result!r}"
-        )
+        raise TypeError(f"orbit_ids malformed: {result!r}")
 
-    # Một số version trả orbits dạng list length = nVertices,
-    # mỗi phần tử là orbit-id (int)
     return orbit_ids
 
 
-def compute_automorphism_symmetry(inst, radius, Nc, Nd, enabled_centers, demands):
+# --------------------------------------------------
+# FULL CNF-FAITHFUL AUTOMORPHISM
+# --------------------------------------------------
+
+def compute_automorphism_symmetry(
+    inst,
+    radius,
+    Nc,
+    Nd,
+    enabled_centers,
+    active_demands,
+    pair_list
+):
     import pynauty
 
     candidates = sorted(enabled_centers - Nc - Nd)
 
     nC = len(candidates)
-    nD = len(demands)
-    total_vertices = nC + nD
+    if nC == 0:
+        return []
+    
+    nD = len(active_demands)
 
+    center_index = {c: i for i, c in enumerate(candidates)}
+    demand_index = {u: i for i, u in enumerate(active_demands)}
+    
+    pair_list = [(a,b) for (a,b) in pair_list if a in center_index and b in center_index]
+    nP = len(pair_list)
+
+    total_vertices = nC + nD + nP
     if total_vertices == 0:
         return []
 
-    center_index = {c: i for i, c in enumerate(candidates)}
-    demand_index = {u: i for i, u in enumerate(demands)}
-
     adj = {i: [] for i in range(total_vertices)}
 
+    # ----------------------------------
+    # 1) center — demand edges
+    # ----------------------------------
     for c in candidates:
         ci = center_index[c]
         row = inst.dist[c]
 
-        for u in demands:
+        for u in active_demands:
             if row[u] <= radius + EPS:
-                ui = demand_index[u] + nC
+                ui = nC + demand_index[u]
                 adj[ci].append(ui)
                 adj[ui].append(ci)
 
-    coloring = [
-        set(range(0, nC)),
-        set(range(nC, nC + nD))
-    ]
+    # ----------------------------------
+    # 2) pair-gadget — center edges
+    # ----------------------------------
+    baseP = nC + nD
+
+    for k, (a, b) in enumerate(pair_list):
+        pv = baseP + k
+        ia = center_index[a]
+        ib = center_index[b]
+
+        adj[pv].append(ia)
+        adj[ia].append(pv)
+
+        adj[pv].append(ib)
+        adj[ib].append(pv)
+
+    # ----------------------------------
+    # Coloring: centers / demands / pair-nodes
+    # ----------------------------------
+    coloring = []
+
+    if nC > 0:
+        coloring.append(set(range(0, nC)))
+    if nD > 0:
+        coloring.append(set(range(nC, nC + nD)))
+    if nP > 0:
+        coloring.append(set(range(nC + nD, total_vertices)))
 
     g = pynauty.Graph(
         number_of_vertices=total_vertices,
         adjacency_dict=adj,
-        vertex_coloring=coloring
+        vertex_coloring=coloring,
     )
 
     result = pynauty.autgrp(g)
@@ -128,25 +128,33 @@ def compute_automorphism_symmetry(inst, radius, Nc, Nd, enabled_centers, demands
     auto_classes.sort()
     return auto_classes
 
-# ============================================================
-# Symmetry breaking using automorphism orbits
-# ============================================================
+
+# --------------------------------------------------
+# Symmetry breaking clauses
+# --------------------------------------------------
 
 def automorphism_symmetry_breaking(
     self,
     cnf,
-    radius: float,
-    Nc, Nd, enabled_centers, demands,
-    mode: str = "chain",   # "chain" or "leader"
+    radius,
+    Nc,
+    Nd,
+    enabled_centers,
+    active_demands,
+    pair_list,
+    mode="chain",
 ):
-    """
-    Break FULL structural automorphism symmetry of the coverage graph.
-    No dominance. No identical-only logic.
-    """
-
     ylit = self.y_lit_all
 
-    orbits = compute_automorphism_symmetry(self, radius, Nc, Nd, enabled_centers, demands)
+    orbits = compute_automorphism_symmetry(
+        self,
+        radius,
+        Nc,
+        Nd,
+        enabled_centers,
+        active_demands,
+        pair_list,
+    )
 
     if not orbits:
         return
@@ -158,14 +166,9 @@ def automorphism_symmetry_breaking(
             leader = group[0]
             for c in group[1:]:
                 cnf.append([-ylit[c], ylit[leader]])
-
-        else:  # chain mode
+        else:  # chain
             for a, b in zip(group, group[1:]):
                 cnf.append([-ylit[b], ylit[a]])
-
-# --------------------------------------------------
-# Load instance
-# --------------------------------------------------
 
 def load_instance_and_seed_radius(inst_desc):
     from experiments import load_instance
@@ -173,10 +176,15 @@ def load_instance_and_seed_radius(inst_desc):
     radius = inst.radii[seed_idx]
     return inst, radius
 
-
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
+def compute_active_demands(inst, radius, Nc, demands):
+    covered = [False] * inst.n
+    if Nc:
+        for c in Nc:
+            row = inst.dist[c]
+            for u in demands:
+                if (not covered[u]) and row[u] <= radius + EPS:
+                    covered[u] = True
+    return [u for u in demands if not covered[u]]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -199,62 +207,42 @@ def main():
         inst, radius = load_instance_and_seed_radius(inst_desc)
         print(f"  mapped radius = {radius}")
 
-        Nc, Nd, enabled_centers, demands, _ = compute_reduction(inst.dist, inst.n, radius)
-
-        # =============================
-        # IDENTICAL
-        # =============================
-
-        identical_classes, candidates = compute_identical_coverage_symmetry(inst, radius, Nc, Nd, enabled_centers, demands)
-
-        num_candidates = len(candidates)
-        total_sym_nodes = sum(len(c) for c in identical_classes)
-        max_class = max((len(c) for c in identical_classes), default=0)
-        num_classes = len(identical_classes)
-
-        symmetry_ratio = (
-            total_sym_nodes / num_candidates
-            if num_candidates > 0 else 0
+        # NOTE: new reduction returns at_least_pairs (5th value)
+        Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(
+            inst.dist, inst.n, radius
         )
 
-        summary_rows.append({
-            "instance": name,
-            "p": p,
-            "radius_used": radius,
-            "symmetry_type": "identical",
-            "num_candidates": num_candidates,
-            "num_symmetry_classes": num_classes,
-            "total_symmetric_nodes": total_sym_nodes,
-            "max_class_size": max_class,
-            "symmetry_ratio": symmetry_ratio
-        })
+        # compute active_demands exactly like encoder.py
+        active_demands = compute_active_demands(inst, radius, Nc, demands)
 
-        for idx, centers in enumerate(identical_classes, start=1):
-            detail_rows.append({
-                "instance": name,
-                "p": p,
-                "radius_used": radius,
-                "symmetry_type": "identical",
-                "class_id": idx,
-                "class_size": len(centers),
-                "centers": " ".join(map(str, centers))
-            })
+        # candidates like encoder.py (enabled minus forced)
+        candidates = sorted(enabled_centers - Nc - Nd)
+        num_candidates = len(candidates)
+        cand_set = set(candidates)
+        pair_list = []
+        for (a,b) in at_least_pairs:
+            if a in cand_set and b in cand_set:
+                aa, bb = (a,b) if a < b else (b,a)
+                pair_list.append((aa,bb))
 
-        # =============================
-        # AUTOMORPHISM
-        # =============================
-
-        auto_classes = compute_automorphism_symmetry(inst, radius, Nc, Nd, enabled_centers, demands)
+        # AUTOMORPHISM CNF-FAITHFUL (new)
+        auto_classes = compute_automorphism_symmetry(
+            inst,
+            radius,
+            Nc,
+            Nd,
+            enabled_centers,
+            active_demands,
+            pair_list,
+        )
 
         total_auto_nodes = sum(len(c) for c in auto_classes)
         max_auto_class = max((len(c) for c in auto_classes), default=0)
         num_auto_classes = len(auto_classes)
 
-        auto_ratio = (
-            total_auto_nodes / num_candidates
-            if num_candidates > 0 else 0
-        )
+        auto_ratio = (total_auto_nodes / num_candidates) if num_candidates > 0 else 0.0
 
+        # -------- summary row --------
         summary_rows.append({
             "instance": name,
             "p": p,
@@ -264,9 +252,10 @@ def main():
             "num_symmetry_classes": num_auto_classes,
             "total_symmetric_nodes": total_auto_nodes,
             "max_class_size": max_auto_class,
-            "symmetry_ratio": auto_ratio
+            "symmetry_ratio": auto_ratio,
         })
 
+        # -------- detail rows --------
         for idx, centers in enumerate(auto_classes, start=1):
             detail_rows.append({
                 "instance": name,
@@ -275,28 +264,35 @@ def main():
                 "symmetry_type": "automorphism",
                 "class_id": idx,
                 "class_size": len(centers),
-                "centers": " ".join(map(str, centers))
+                "centers": " ".join(map(str, centers)),
             })
 
     # ------------------------------
-    # Write CSV
+    # Write CSV (same as old)
     # ------------------------------
+    if summary_rows:
+        summary_path = f"{args.out_prefix}_summary.csv"
+        with open(summary_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(summary_rows)
+    else:
+        summary_path = None
 
-    summary_path = f"{args.out_prefix}_summary.csv"
-    with open(summary_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=summary_rows[0].keys())
-        writer.writeheader()
-        writer.writerows(summary_rows)
-
-    detail_path = f"{args.out_prefix}_details.csv"
-    with open(detail_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=detail_rows[0].keys())
-        writer.writeheader()
-        writer.writerows(detail_rows)
+    if detail_rows:
+        detail_path = f"{args.out_prefix}_details.csv"
+        with open(detail_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(detail_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(detail_rows)
+    else:
+        detail_path = None
 
     print("[DONE]")
-    print("  ", summary_path)
-    print("  ", detail_path)
+    if summary_path:
+        print("  ", summary_path)
+    if detail_path:
+        print("  ", detail_path)
 
 
 if __name__ == "__main__":

@@ -330,8 +330,6 @@ def compute_reduction(dist_matrix: List[List[float]], n: int, radius: float, csv
     remaining = n_total - total_fixed - total_removed
     reduction_rate = ((total_fixed + total_removed) / n_total) * 100 if n_total > 0 else 0
 
-    print(f"[RADIUS {radius}] Rem: {remaining} | Rate: {reduction_rate:.2f}% (R1:-{r1_removed}, R2:-{r2_removed}, Add:-{add_removed})")
-
     if csv_path:
         file_exists = os.path.isfile(csv_path)
         

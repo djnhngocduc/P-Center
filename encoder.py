@@ -1,6 +1,7 @@
 import math
 from typing import List, Tuple
 from threading import RLock
+
 from pysat.formula import CNF
 from pysat.card import CardEnc
 from pysat.card import EncType as CardEncType
@@ -12,12 +13,12 @@ from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
 from reduction import compute_reduction
-
-# from sb import sb_coverage_order, orbit_symmetry_breaking
 from sb import automorphism_symmetry_breaking
 
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
+
+EPS = 1e-12
 
 class PCenterSAT:
     def __init__(self, dist: List[List[float]], p: int):
@@ -28,8 +29,7 @@ class PCenterSAT:
         self.radii: List[float] = self._compute_radii(dist)
         self.y_lit_all = [self._y(i) for i in range(self.n)] 
 
-    def _y(self, j: int) -> int:
-        # 1..n
+    def _y(self, j: int):
         return 1 + j
 
     @staticmethod
@@ -48,7 +48,7 @@ class PCenterSAT:
         return PCenterSAT(D, p)
 
     @staticmethod
-    def _compute_radii(D: List[List[float]]) -> List[float]:
+    def _compute_radii(D: List[List[float]]):
         n = len(D)
         vals = set()
         INF = 10 ** 12
@@ -62,80 +62,60 @@ class PCenterSAT:
     def _encode_cnf(self, radius: float, encoding: str):
         cnf = CNF()
 
-        Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(self.dist, self.n, radius)
+        Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(
+            self.dist, self.n, radius
+        )
 
-        cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
+        candidates = sorted(list((enabled_centers - Nc) - Nd))
+        cand_set = set(candidates)
 
-        for clause in cnf_extra:
-            cnf.append(clause)
+        pair_list = []
+        for (a, b) in sorted(at_least_pairs):
+            if a in cand_set and b in cand_set:
+                aa, bb = (a, b) if a < b else (b, a)
+                pair_list.append((aa, bb))
+                cnf.append([self.y_lit_all[aa], self.y_lit_all[bb]])
 
         for c in Nc:
             cnf.append([self._y(c)])
-
         for d in Nd:
             cnf.append([-self._y(d)])
 
-        Npp = (enabled_centers - Nc) - Nd
-        candidates = sorted(list(Npp))
-
         covered = [False] * self.n
         if Nc:
-            # only check u in demands
             for c in Nc:
                 row = self.dist[c]
                 for u in demands:
-                    if not covered[u] and row[u] <= radius + 1e-12:
+                    if (not covered[u]) and row[u] <= radius + EPS:
                         covered[u] = True
 
-        # ---- demand coverage clauses using candidates list (avoid set scans)
-        for u in demands:
-            if covered[u]:
-                continue
-            row_u = u  # just name
+        active_demands = [u for u in demands if not covered[u]]
+
+        for u in active_demands:
             allowed = []
-            # scan candidates once
             for c in candidates:
-                if self.dist[c][row_u] <= radius + 1e-12:
+                if self.dist[c][u] <= radius + EPS:
                     allowed.append(self.y_lit_all[c])
             if not allowed:
                 return None, {}
             cnf.append(allowed)
 
-        # cnf_extra contains clauses [y(a), y(b)] where y(j)=1+j
-        # pair_clauses = []
-        # for cl in cnf_extra:
-        #     if len(cl) == 2 and cl[0] > 0 and cl[1] > 0:
-        #         a = cl[0] - 1
-        #         b = cl[1] - 1
-        #         pair_clauses.append((a, b))
+        bound = self.p - len(Nc)
+        if bound < 0:
+            if DEBUG_REDUCTION:
+                print(
+                    f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 "
+                    f"(p={self.p}, |Nc|={len(Nc)})"
+                )
+            return None, {}
 
-
-        # mask2cands, dom_out, dom_in = sb_coverage_order(
-        #     self, cnf, radius, candidates, demands, Nc
-        # )
-
-        # orbit_symmetry_breaking(
-        #     self,
-        #     cnf,
-        #     mask2cands=mask2cands,
-        #     dom_out=dom_out,
-        #     dom_in=dom_in,
-        #     pair_clauses=pair_clauses,
-        #     orbit_mode="chain",   # hoặc "leader"
-        # )
         automorphism_symmetry_breaking(
             self,
             cnf,
             radius,
-            Nc, Nd, enabled_centers, demands,
-            mode="leader",  # hoặc "leader"
+            Nc, Nd, enabled_centers, active_demands, pair_list,
+            mode="chain",
         )
-
-        bound = self.p - len(Nc)      
-        if bound < 0:
-            if DEBUG_REDUCTION:
-                print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
-            return None, {}
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
@@ -150,20 +130,24 @@ class PCenterSAT:
                     amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                     cnf.extend(amo.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
             elif encoding == "pysat_mtotalizer":
                 enc_kind = CardEncType.mtotalizer
                 with _PYSAT_CNF_LOCK:
                     amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                     cnf.extend(amo.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
             elif encoding == "pysat_totalizer":
                 enc_kind = CardEncType.totalizer
                 with _PYSAT_CNF_LOCK:
                     amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                     cnf.extend(amo.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
             elif encoding == "nsc":
                 self._encode_atmost_nsc(cnf, lits, bound)
+
             elif encoding == "pypb_bdd":
                 enc_kind = PBEncType.bdd
                 with _PYSAT_CNF_LOCK:
@@ -176,6 +160,7 @@ class PCenterSAT:
                     )
                     cnf.extend(pbcnf.clauses)
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
+
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
 
