@@ -69,12 +69,15 @@ class PCenterSAT:
         candidates = sorted(list((enabled_centers - Nc) - Nd))
         cand_set = set(candidates)
 
-        pair_list = []
-        for (a, b) in sorted(at_least_pairs):
+        pair_set = set()
+        for (a,b) in at_least_pairs:
             if a in cand_set and b in cand_set:
-                aa, bb = (a, b) if a < b else (b, a)
-                pair_list.append((aa, bb))
-                cnf.append([self.y_lit_all[aa], self.y_lit_all[bb]])
+                aa, bb = (a,b) if a < b else (b,a)
+                pair_set.add((aa,bb))
+        pair_list = sorted(pair_set)
+
+        for (aa,bb) in pair_list:
+            cnf.append([self.y_lit_all[aa], self.y_lit_all[bb]])
 
         for c in Nc:
             cnf.append([self._y(c)])
