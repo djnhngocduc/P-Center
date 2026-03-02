@@ -1,7 +1,5 @@
 from typing import List, Tuple, Set
 from collections import deque
-import csv
-import os
 
 def _build_neighbours(dist_matrix: List[List[float]], n: int, radius: float) -> List[List[int]]:
     neigh = [[] for _ in range(n)]
@@ -297,82 +295,15 @@ def _addition_rule(
 
     del_set.difference_update(true_set)
 
-def compute_reduction(dist_matrix: List[List[float]], n: int, radius: float, csv_path: str = "reduction.csv"):
+def compute_reduction(dist_matrix: List[List[float]], n: int, radius: float):
     neighbours = _build_neighbours(dist_matrix, n, radius)
 
     Nc, Nd = set(), set()
     at_least_pairs: Set[Tuple[int, int]] = set()
 
-    n_total = n
-
-    t0_Nc, t0_Nd = len(Nc), len(Nd)
     _rule1(neighbours, Nc, Nd)
-    t1_Nc, t1_Nd = len(Nc), len(Nd)
-    
-    r1_fixed = t1_Nc - t0_Nc
-    r1_removed = t1_Nd - t0_Nd
-    
     _rule2(neighbours, at_least_pairs, Nc, Nd)
-    t2_Nc, t2_Nd = len(Nc), len(Nd)
-    
-    r2_fixed = t2_Nc - t1_Nc
-    r2_removed = t2_Nd - t1_Nd
-    r2_pairs = len(at_least_pairs)
-
     _addition_rule(neighbours, at_least_pairs, Nc, Nd)
-    t3_Nc, t3_Nd = len(Nc), len(Nd)
-        
-    add_fixed = t3_Nc - t2_Nc
-    add_removed = t3_Nd - t2_Nd
-
-    total_fixed = len(Nc)
-    total_removed = len(Nd)
-    remaining = n_total - total_fixed - total_removed
-    reduction_rate = ((total_fixed + total_removed) / n_total) * 100 if n_total > 0 else 0
-
-    if csv_path:
-        file_exists = os.path.isfile(csv_path)
-        
-        # Định nghĩa các cột
-        fieldnames = [
-            'radius', 
-            'total_nodes', 
-            'remaining_nodes',
-            'reduction_rate_percent',
-            'total_fixed', 
-            'total_removed',
-            'r1_fixed', 'r1_removed',
-            'r2_fixed', 'r2_removed', 'r2_pairs',
-            'add_fixed', 'add_removed'
-        ]
-        
-        # Dữ liệu của dòng hiện tại
-        row_data = {
-            'radius': radius,
-            'total_nodes': n_total,
-            'remaining_nodes': remaining,
-            'reduction_rate_percent': round(reduction_rate, 2),
-            'total_fixed': total_fixed,
-            'total_removed': total_removed,
-            'r1_fixed': r1_fixed,
-            'r1_removed': r1_removed,
-            'r2_fixed': r2_fixed,
-            'r2_removed': r2_removed,
-            'r2_pairs': r2_pairs,
-            'add_fixed': add_fixed,
-            'add_removed': add_removed
-        }
-
-        try:
-            with open(csv_path, mode='a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                
-                if not file_exists:
-                    writer.writeheader()
-                
-                writer.writerow(row_data)
-        except Exception as e:
-            print(f"[ERROR] Could not write to CSV: {e}")
 
     enabled_centers = set(range(n))
     demands = list(range(n))
