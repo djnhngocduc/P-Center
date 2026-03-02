@@ -1,0 +1,5 @@
+#define VERSION "4.0.2"
+#define COMPILER "gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0 -W -Wall -O3 -DNDEBUG"
+#define ID "unknown"
+#define BUILD "Mon Mar 2 13:57:32 UTC 2026 Linux pcenter 6.8.0-1048-gcp x86_64"
+#define DIR "/home/g22028166/P-Center/solvers/kissat/build"
