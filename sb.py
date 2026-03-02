@@ -1,7 +1,3 @@
-import argparse
-import json
-import csv
-from reduction import compute_reduction
 from collections import defaultdict
 
 EPS = 1e-12
@@ -41,27 +37,31 @@ def compute_automorphism_symmetry(
     Nd,
     enabled_centers,
     active_demands,
-    pair_list
+    at_least_pairs
 ):
     import pynauty
 
     candidates = sorted(enabled_centers - Nc - Nd)
+    cand_set = set(candidates)
 
     nC = len(candidates)
-    if nC == 0:
-        return []
-    
     nD = len(active_demands)
 
-    center_index = {c: i for i, c in enumerate(candidates)}
-    demand_index = {u: i for i, u in enumerate(active_demands)}
-    
-    pair_list = [(a,b) for (a,b) in pair_list if a in center_index and b in center_index]
+    # keep only relevant pairs among candidates
+    pair_list = [
+        (a, b)
+        for (a, b) in at_least_pairs
+        if a in cand_set and b in cand_set
+    ]
+
     nP = len(pair_list)
 
     total_vertices = nC + nD + nP
     if total_vertices == 0:
         return []
+
+    center_index = {c: i for i, c in enumerate(candidates)}
+    demand_index = {u: i for i, u in enumerate(active_demands)}
 
     adj = {i: [] for i in range(total_vertices)}
 
@@ -120,6 +120,7 @@ def compute_automorphism_symmetry(
         orbit_dict[oid].append(v)
 
     auto_classes = []
+
     for orbit in orbit_dict.values():
         centers = [candidates[v] for v in orbit if v < nC]
         if len(centers) >= 2:
@@ -141,7 +142,7 @@ def automorphism_symmetry_breaking(
     Nd,
     enabled_centers,
     active_demands,
-    pair_list,
+    at_least_pairs,
     mode="chain",
 ):
     ylit = self.y_lit_all
@@ -153,7 +154,7 @@ def automorphism_symmetry_breaking(
         Nd,
         enabled_centers,
         active_demands,
-        pair_list,
+        at_least_pairs,
     )
 
     if not orbits:
@@ -169,131 +170,3 @@ def automorphism_symmetry_breaking(
         else:  # chain
             for a, b in zip(group, group[1:]):
                 cnf.append([-ylit[b], ylit[a]])
-
-def load_instance_and_seed_radius(inst_desc):
-    from experiments import load_instance
-    inst, seed_idx = load_instance(inst_desc)
-    radius = inst.radii[seed_idx]
-    return inst, radius
-
-def compute_active_demands(inst, radius, Nc, demands):
-    covered = [False] * inst.n
-    if Nc:
-        for c in Nc:
-            row = inst.dist[c]
-            for u in demands:
-                if (not covered[u]) and row[u] <= radius + EPS:
-                    covered[u] = True
-    return [u for u in demands if not covered[u]]
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--instances", required=True)
-    parser.add_argument("--out-prefix", default="symmetry")
-    args = parser.parse_args()
-
-    with open(args.instances, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    summary_rows = []
-    detail_rows = []
-
-    for inst_desc in data:
-        name = inst_desc["name"]
-        p = inst_desc["p"]
-
-        print(f"[PROCESS] {name}, p={p}")
-
-        inst, radius = load_instance_and_seed_radius(inst_desc)
-        print(f"  mapped radius = {radius}")
-
-        # NOTE: new reduction returns at_least_pairs (5th value)
-        Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(
-            inst.dist, inst.n, radius
-        )
-
-        # compute active_demands exactly like encoder.py
-        active_demands = compute_active_demands(inst, radius, Nc, demands)
-
-        # candidates like encoder.py (enabled minus forced)
-        candidates = sorted(enabled_centers - Nc - Nd)
-        num_candidates = len(candidates)
-        cand_set = set(candidates)
-        pair_list = []
-        for (a,b) in at_least_pairs:
-            if a in cand_set and b in cand_set:
-                aa, bb = (a,b) if a < b else (b,a)
-                pair_list.append((aa,bb))
-
-        # AUTOMORPHISM CNF-FAITHFUL (new)
-        auto_classes = compute_automorphism_symmetry(
-            inst,
-            radius,
-            Nc,
-            Nd,
-            enabled_centers,
-            active_demands,
-            pair_list,
-        )
-
-        total_auto_nodes = sum(len(c) for c in auto_classes)
-        max_auto_class = max((len(c) for c in auto_classes), default=0)
-        num_auto_classes = len(auto_classes)
-
-        auto_ratio = (total_auto_nodes / num_candidates) if num_candidates > 0 else 0.0
-
-        # -------- summary row --------
-        summary_rows.append({
-            "instance": name,
-            "p": p,
-            "radius_used": radius,
-            "symmetry_type": "automorphism",
-            "num_candidates": num_candidates,
-            "num_symmetry_classes": num_auto_classes,
-            "total_symmetric_nodes": total_auto_nodes,
-            "max_class_size": max_auto_class,
-            "symmetry_ratio": auto_ratio,
-        })
-
-        # -------- detail rows --------
-        for idx, centers in enumerate(auto_classes, start=1):
-            detail_rows.append({
-                "instance": name,
-                "p": p,
-                "radius_used": radius,
-                "symmetry_type": "automorphism",
-                "class_id": idx,
-                "class_size": len(centers),
-                "centers": " ".join(map(str, centers)),
-            })
-
-    # ------------------------------
-    # Write CSV (same as old)
-    # ------------------------------
-    if summary_rows:
-        summary_path = f"{args.out_prefix}_summary.csv"
-        with open(summary_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(summary_rows)
-    else:
-        summary_path = None
-
-    if detail_rows:
-        detail_path = f"{args.out_prefix}_details.csv"
-        with open(detail_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(detail_rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(detail_rows)
-    else:
-        detail_path = None
-
-    print("[DONE]")
-    if summary_path:
-        print("  ", summary_path)
-    if detail_path:
-        print("  ", detail_path)
-
-
-if __name__ == "__main__":
-    main()
