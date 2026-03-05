@@ -102,14 +102,6 @@ class PCenterSAT:
             allowed_map[u] = allowed_t
             cnf.append(list(allowed_t))
 
-        automorphism_symmetry_breaking(
-            self,
-            cnf,
-            radius,
-            Nc, Nd, enabled_centers, active_demands, at_least_pairs, allowed_map,
-            mode="chain",  # hoặc "leader"
-        )
-
         bound = self.p - len(Nc)      
         if bound < 0:
             if DEBUG_REDUCTION:
@@ -157,6 +149,8 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
+                
+        automorphism_symmetry_breaking(self, cnf, candidates, mode="chain")
 
         info = {
             "Nc": Nc, "Nd": Nd,

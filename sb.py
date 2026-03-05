@@ -1,72 +1,62 @@
 from collections import defaultdict
 
+def _get_orbit_ids_from_autgrp(result, n_vertices: int):
+    if not isinstance(result, (tuple, list)) or not result:
+        raise TypeError(f"autgrp returned unexpected: {type(result)} {result!r}")
+    for item in result:
+        if isinstance(item, (list, tuple)) and len(item) == n_vertices and all(isinstance(x, int) for x in item):
+            return item
+    last = result[-1]
+    if isinstance(last, (list, tuple)) and len(last) == n_vertices and all(isinstance(x, int) for x in last):
+        return last
+    raise TypeError(f"orbit_ids not found (n_vertices={n_vertices}): {result!r}")
 
-def _build_prefix_clauses(self, Nc, Nd, at_least_pairs, active_demands, allowed_map):
-    typed = []
-
-    for (a, b) in at_least_pairs:
-        typed.append(("pair", (self.y_lit_all[a], self.y_lit_all[b])))
-
-    for c in Nc:
-        typed.append(("unit_pos", (self.y_lit_all[c],)))
-
-    for d in Nd:
-        typed.append(("unit_neg", (-self.y_lit_all[d],)))
-
-    for u in active_demands:
-        lits = allowed_map.get(u)
-        if not lits:
-            return None
-        typed.append(("cover", tuple(lits)))
-
-    return typed
-
-
-def _cnf_prefix_to_pynauty_graph(typed_clauses, var_lits, cand_var_lits):
+def _cnf_to_pynauty_graph_full(cnf, cand_vars):
     import pynauty
 
+    # Collect all vars appearing in CNF (including aux vars)
+    var_set = set()
+    for cls in cnf.clauses:
+        for lit in cls:
+            var_set.add(abs(lit))
+    var_lits = sorted(var_set)
+
+    # literal nodes
     pos_id, neg_id = {}, {}
     nodes = 0
     for v in var_lits:
         pos_id[v] = nodes; nodes += 1
         neg_id[v] = nodes; nodes += 1
 
+    # clause nodes
     clause_nodes = []
-    for _ in typed_clauses:
+    for _ in cnf.clauses:
         clause_nodes.append(nodes)
         nodes += 1
 
     adj = {i: [] for i in range(nodes)}
-
     def add_edge(a, b):
-        adj[a].append(b)
-        adj[b].append(a)
+        adj[a].append(b); adj[b].append(a)
 
     # bind pos/neg
     for v in var_lits:
         add_edge(pos_id[v], neg_id[v])
 
-    # clause-literal incidence
-    for cnode, (ctype, cls) in zip(clause_nodes, typed_clauses):
+    # incidence edges
+    for cnode, cls in zip(clause_nodes, cnf.clauses):
         for lit in cls:
             v = abs(lit)
             lnode = pos_id[v] if lit > 0 else neg_id[v]
             add_edge(cnode, lnode)
 
-    # -------- Coloring (CRITICAL FIX) --------
-    # Split literals by whether the underlying variable is a candidate (counted by AtMost) or not.
-    pos_cand = set()
-    pos_other = set()
-    neg_cand = set()
-    neg_other = set()
-
+    # ---- Coloring (CRITICAL) ----
+    # Split literals by candidate vars vs others, and by sign
+    pos_cand, pos_other, neg_cand, neg_other = set(), set(), set(), set()
     for v in var_lits:
-        if v in cand_var_lits:
-            pos_cand.add(pos_id[v])
-            neg_cand.add(neg_id[v])
+        if v in cand_vars:
+            pos_cand.add(pos_id[v]); neg_cand.add(neg_id[v])
         else:
-            pos_other.add(pos_id[v])
-            neg_other.add(neg_id[v])
+            pos_other.add(pos_id[v]); neg_other.add(neg_id[v])
 
     coloring = []
     if pos_cand:  coloring.append(pos_cand)
@@ -74,13 +64,13 @@ def _cnf_prefix_to_pynauty_graph(typed_clauses, var_lits, cand_var_lits):
     if neg_cand:  coloring.append(neg_cand)
     if neg_other: coloring.append(neg_other)
 
-    # Clause colors by (type, length)
-    by_kind = defaultdict(list)
-    for cnode, (ctype, cls) in zip(clause_nodes, typed_clauses):
-        by_kind[(ctype, len(cls))].append(cnode)
-    for key in sorted(by_kind.keys(), key=lambda x: (x[0], x[1])):
-        coloring.append(set(by_kind[key]))
-    # ----------------------------------------
+    # Clause coloring by length only (full CNF already distinguishes structure via neighbors)
+    by_len = defaultdict(list)
+    for cnode, cls in zip(clause_nodes, cnf.clauses):
+        by_len[len(cls)].append(cnode)
+    for L in sorted(by_len):
+        coloring.append(set(by_len[L]))
+    # -----------------------------
 
     g = pynauty.Graph(
         number_of_vertices=nodes,
@@ -89,107 +79,35 @@ def _cnf_prefix_to_pynauty_graph(typed_clauses, var_lits, cand_var_lits):
     )
     return g, pos_id, nodes
 
+def compute_candidate_orbits_from_full_cnf(cnf, candidate_center_indices, y_lit_all):
+    import pynauty
 
-def _get_orbit_ids_from_autgrp(result, n_vertices: int):
-    if not isinstance(result, (tuple, list)) or not result:
-        raise TypeError(f"autgrp returned unexpected: {type(result)} {result!r}")
-
-    for item in result:
-        if isinstance(item, (list, tuple)) and len(item) == n_vertices and all(isinstance(x, int) for x in item):
-            return item
-
-    last = result[-1]
-    if isinstance(last, (list, tuple)) and len(last) == n_vertices and all(isinstance(x, int) for x in last):
-        return last
-
-    raise TypeError(f"orbit_ids not found (n_vertices={n_vertices}): {result!r}")
-
-
-def compute_automorphism_symmetry(
-    self,
-    radius,
-    Nc,
-    Nd,
-    enabled_centers,
-    active_demands,
-    at_least_pairs,
-    allowed_map,
-):
-    import pynauty  # noqa: F401
-
-    typed_clauses = _build_prefix_clauses(self, Nc, Nd, at_least_pairs, active_demands, allowed_map)
-    if typed_clauses is None:
+    cand_vars = set(y_lit_all[c] for c in candidate_center_indices)  # SAT var ids
+    if len(cand_vars) <= 1:
         return []
 
-    # candidates exactly like encoder.py (these are the ones constrained by AtMost)
-    candidates = sorted(((enabled_centers - Nc) - Nd))
-    cand_set = set(candidates)
-    cand_var_lits = set(self.y_lit_all[c] for c in candidates)  # SAT var numbers (1..n)
-
-    # vars in prefix
-    var_set = set(cand_var_lits)
-
-    for (a, b) in at_least_pairs:
-        var_set.add(self.y_lit_all[a])
-        var_set.add(self.y_lit_all[b])
-    for c in Nc:
-        var_set.add(self.y_lit_all[c])
-    for d in Nd:
-        var_set.add(self.y_lit_all[d])
-
-    for u in active_demands:
-        for lit in allowed_map.get(u, ()):
-            var_set.add(abs(lit))
-
-    var_lits = sorted(var_set)
-    if len(var_lits) <= 1:
-        return []
-
-    g, pos_id, n_vertices = _cnf_prefix_to_pynauty_graph(typed_clauses, var_lits, cand_var_lits)
+    g, pos_id, n_vertices = _cnf_to_pynauty_graph_full(cnf, cand_vars)
     result = pynauty.autgrp(g)
     orbit_ids = _get_orbit_ids_from_autgrp(result, n_vertices)
 
+    # orbit by variable using pos literal node id
     orbit_dict = defaultdict(list)
-    for lit in var_lits:
-        oid = orbit_ids[pos_id[lit]]
-        orbit_dict[oid].append(lit)
+    for v in cand_vars:
+        oid = orbit_ids[pos_id[v]]
+        orbit_dict[oid].append(v)
 
-    # Return classes as CENTER INDICES among candidates only
-    classes = []
-    for orbit_vars in orbit_dict.values():
-        grp = [v - 1 for v in orbit_vars if (v - 1) in cand_set]
+    # map back to center indices: v = 1 + c => c = v - 1
+    orbits = []
+    for vars_ in orbit_dict.values():
+        grp = sorted([v - 1 for v in vars_])
         if len(grp) >= 2:
-            classes.append(sorted(grp))
+            orbits.append(grp)
+    orbits.sort()
+    return orbits
 
-    classes.sort()
-    return classes
-
-
-def automorphism_symmetry_breaking(
-    self,
-    cnf,
-    radius,
-    Nc,
-    Nd,
-    enabled_centers,
-    active_demands,
-    at_least_pairs,
-    allowed_map,
-    mode="chain",
-):
+def automorphism_symmetry_breaking(self, cnf, candidates, mode="chain"):
     ylit = self.y_lit_all
-
-    orbits = compute_automorphism_symmetry(
-        self,
-        radius,
-        Nc,
-        Nd,
-        enabled_centers,
-        active_demands,
-        at_least_pairs,
-        allowed_map,
-    )
-
+    orbits = compute_candidate_orbits_from_full_cnf(cnf, candidates, ylit)
     if not orbits:
         return
 
