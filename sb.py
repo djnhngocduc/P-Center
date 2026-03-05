@@ -24,9 +24,9 @@ def _build_prefix_clauses(self, Nc, Nd, at_least_pairs, active_demands, allowed_
 
     # (4) coverage clauses: already computed in encoder
     for u in active_demands:
-        lits = allowed_map.get(u, None)
+        lits = allowed_map.get(u)
         if not lits:
-            # if encoder would have failed, SB should add nothing
+            # encoder would have returned None
             return None
         typed.append(("cover", tuple(lits)))
 
@@ -84,17 +84,29 @@ def _cnf_prefix_to_pynauty_graph(typed_clauses, var_lits):
     return g, pos_id, nodes
 
 
-def _get_orbit_ids_from_autgrp(result):
+def _get_orbit_ids_from_autgrp(result, n_vertices: int):
+    """
+    Robustly locate orbit-ids array in pynauty.autgrp result by signature:
+      - is list/tuple
+      - length == n_vertices
+      - all elements are int
+    This avoids relying on result[-1] / result[-2] which differs across builds.
+    """
     if not isinstance(result, (tuple, list)) or len(result) == 0:
         raise TypeError(f"autgrp returned unexpected: {type(result)} {result!r}")
 
+    # Search any element matching the orbit-id vector shape
+    for item in result:
+        if isinstance(item, (list, tuple)) and len(item) == n_vertices:
+            if all(isinstance(x, int) for x in item):
+                return item
+
+    # Fallback: sometimes orbit ids can be nested as last element
     last = result[-1]
-    orbit_ids = result[-2] if isinstance(last, int) and len(result) >= 2 else last
+    if isinstance(last, (list, tuple)) and len(last) == n_vertices and all(isinstance(x, int) for x in last):
+        return last
 
-    if not isinstance(orbit_ids, (list, tuple)):
-        raise TypeError(f"orbit_ids malformed: {result!r}")
-
-    return orbit_ids
+    raise TypeError(f"orbit_ids not found (n_vertices={n_vertices}): {result!r}")
 
 
 def compute_automorphism_symmetry(
@@ -107,7 +119,7 @@ def compute_automorphism_symmetry(
     at_least_pairs,
     allowed_map,
 ):
-    import pynauty
+    import pynauty  # noqa: F401 (import required for autgrp)
 
     typed_clauses = _build_prefix_clauses(
         self, Nc, Nd, at_least_pairs, active_demands, allowed_map
@@ -115,11 +127,11 @@ def compute_automorphism_symmetry(
     if typed_clauses is None:
         return []
 
-    # candidates exactly like encoder.py (needed only to filter returned groups)
+    # candidates exactly like encoder.py (only used to filter groups)
     candidates = sorted(((enabled_centers - Nc) - Nd))
     cand_set = set(candidates)
 
-    # variables appearing in the prefix (as SAT var numbers 1..n)
+    # variables appearing in the prefix (SAT var numbers 1..n)
     var_set = set(self.y_lit_all[c] for c in candidates)
     for (a, b) in at_least_pairs:
         var_set.add(self.y_lit_all[a])
@@ -129,9 +141,9 @@ def compute_automorphism_symmetry(
     for d in Nd:
         var_set.add(self.y_lit_all[d])
 
-    # also add vars from coverage clauses (allowed_map), to be fully faithful
+    # include vars from coverage clauses (allowed_map)
     for u in active_demands:
-        for lit in allowed_map[u]:
+        for lit in allowed_map.get(u, ()):
             var_set.add(abs(lit))
 
     var_lits = sorted(var_set)
@@ -140,12 +152,7 @@ def compute_automorphism_symmetry(
 
     g, pos_id, n_vertices = _cnf_prefix_to_pynauty_graph(typed_clauses, var_lits)
     result = pynauty.autgrp(g)
-    orbit_ids = _get_orbit_ids_from_autgrp(result)
-
-    if len(orbit_ids) != n_vertices:
-        raise TypeError(
-            f"orbit_ids length mismatch: got {len(orbit_ids)} expected {n_vertices}. result={result!r}"
-        )
+    orbit_ids = _get_orbit_ids_from_autgrp(result, n_vertices)
 
     # orbit on pos literal node => orbit of variable
     orbit_dict = defaultdict(list)
@@ -188,6 +195,9 @@ def automorphism_symmetry_breaking(
         at_least_pairs,
         allowed_map,
     )
+
+    if not orbits:
+        return
 
     for group in orbits:
         group.sort()
