@@ -88,8 +88,6 @@ class PCenterSAT:
         active_demands = [u for u in demands if not covered[u]]
 
         # ---- demand coverage clauses using candidates list (avoid set scans)
-        allowed_map = {}
-
         for u in active_demands:
             allowed = []
             # scan candidates once
@@ -98,15 +96,15 @@ class PCenterSAT:
                     allowed.append(self.y_lit_all[c])
             if not allowed:
                 return None, {}
-            allowed_t = tuple(allowed)
-            allowed_map[u] = allowed_t
-            cnf.append(list(allowed_t))
+            cnf.append(allowed)
 
         bound = self.p - len(Nc)      
         if bound < 0:
             if DEBUG_REDUCTION:
                 print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
             return None, {}
+        
+        automorphism_symmetry_breaking(self, cnf, radius, Nc, Nd, enabled_centers, demands, mode="chain")
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
@@ -149,8 +147,6 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
-                
-        automorphism_symmetry_breaking(self, cnf, candidates, mode="chain")
 
         info = {
             "Nc": Nc, "Nd": Nd,
