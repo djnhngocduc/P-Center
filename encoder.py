@@ -88,22 +88,25 @@ class PCenterSAT:
         active_demands = [u for u in demands if not covered[u]]
 
         # ---- demand coverage clauses using candidates list (avoid set scans)
+        allowed_map = {}
+
         for u in active_demands:
-            row_u = u  # just name
             allowed = []
             # scan candidates once
             for c in candidates:
-                if self.dist[c][row_u] <= radius + 1e-12:
+                if self.dist[c][u] <= radius + 1e-12:
                     allowed.append(self.y_lit_all[c])
             if not allowed:
                 return None, {}
-            cnf.append(allowed)
+            allowed_t = tuple(allowed)
+            allowed_map[u] = allowed_t
+            cnf.append(list(allowed_t))
 
         automorphism_symmetry_breaking(
             self,
             cnf,
             radius,
-            Nc, Nd, enabled_centers, active_demands, at_least_pairs,
+            Nc, Nd, enabled_centers, active_demands, at_least_pairs, allowed_map,
             mode="chain",  # hoặc "leader"
         )
 
