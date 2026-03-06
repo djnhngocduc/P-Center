@@ -42,10 +42,8 @@ def _extract_orbit_ids_from_autgrp_result(result):
     return orbit_ids
 
 
-def compute_automorphism_symmetry(inst, radius, Nc, Nd, enabled_centers, demands):
+def compute_automorphism_symmetry(inst, radius, candidates, demands):
     import pynauty
-
-    candidates = sorted(enabled_centers - Nc - Nd)
 
     nC = len(candidates)
     nD = len(demands)
@@ -104,7 +102,7 @@ def automorphism_symmetry_breaking(
     self,
     cnf,
     radius: float,
-    Nc, Nd, enabled_centers, demands,
+    candidates, demands,
     mode: str = "chain",   # "chain" or "leader"
 ):
     """
@@ -114,7 +112,7 @@ def automorphism_symmetry_breaking(
 
     ylit = self.y_lit_all
 
-    orbits = compute_automorphism_symmetry(self, radius, Nc, Nd, enabled_centers, demands)
+    orbits = compute_automorphism_symmetry(self, radius, candidates, demands)
 
     if not orbits:
         return
