@@ -496,7 +496,7 @@ def search_min_radius_binary(
 
     print(
         f"[BINARY-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
-        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]}",
+        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR}",
         flush=True
     )
 
@@ -552,7 +552,8 @@ def search_min_radius_binary(
                 )
 
             print(
-                f"[BINARY-DONE] idx={idx} R={Rret} status={status} cpu={cpu_sec:.6f}s",
+                f"[BINARY-DONE] idx={idx} R={Rret} status={status} "
+                f"cpu={cpu_sec:.6f}s nvars={nvars} nclauses={nclauses}",
                 flush=True
             )
 
@@ -563,18 +564,27 @@ def search_min_radius_binary(
                 best_nvars = nvars
                 best_nclauses = nclauses
 
-                # thử radius nhỏ hơn nữa => idx lớn hơn
-                lo = idx + 1
+                new_lo = idx + 1
+                print(
+                    f"[BINARY-MOVE] SAT at idx={idx}, R={Rret} -> "
+                    f"move right: lo {lo} -> {new_lo}, hi stays {hi}",
+                    flush=True
+                )
+                lo = new_lo
 
             elif status == "unsat":
-                # radius này quá nhỏ, phải quay về radius lớn hơn => idx nhỏ hơn
-                hi = idx - 1
+                new_hi = idx - 1
+                print(
+                    f"[BINARY-MOVE] UNSAT at idx={idx}, R={Rret} -> "
+                    f"move left: hi {hi} -> {new_hi}, lo stays {lo}",
+                    flush=True
+                )
+                hi = new_hi
 
             elif status in ("timeout", "error"):
-                # Nếu đã có SAT trước đó thì fallback về SAT tốt nhất hiện có
                 if best_sat_idx is not None:
                     print(
-                        f"[BINARY-FALLBACK] stop on {status}, "
+                        f"[BINARY-FALLBACK] stop on {status}; "
                         f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
                         flush=True
                     )
@@ -587,6 +597,16 @@ def search_min_radius_binary(
         print("[BINARY-RESULT] infeasible (no SAT found)", flush=True)
         search_elapsed = time.perf_counter() - search_t0
         return "infeasible", None, None, None, None, None, search_elapsed
+
+    cert_unsat_idx = best_sat_idx - 1
+    cert_unsat_radius = radii[cert_unsat_idx] if cert_unsat_idx >= 0 else None
+
+    print(
+        f"[BINARY-CERT] optimality boundary: "
+        f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]}, "
+        f"prev_idx={cert_unsat_idx}, prev_R={cert_unsat_radius}",
+        flush=True
+    )
 
     print(
         f"[BINARY-RESULT] status=OK best_idx={best_sat_idx} "
