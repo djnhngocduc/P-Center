@@ -34,31 +34,22 @@ def compute_automorphism_symmetry(
     inst,
     radius,
     candidates,
-    active_demands,
+    demands,
     at_least_pairs
 ):
     import pynauty
 
-    cand_set = set(candidates)
-
     nC = len(candidates)
-    nD = len(active_demands)
+    nD = len(demands)
 
-    # keep only relevant pairs among candidates
-    pair_list = [
-        (a, b)
-        for (a, b) in at_least_pairs
-        if a in cand_set and b in cand_set
-    ]
-
-    nP = len(pair_list)
+    nP = len(at_least_pairs)
 
     total_vertices = nC + nD + nP
     if total_vertices == 0:
         return []
 
     center_index = {c: i for i, c in enumerate(candidates)}
-    demand_index = {u: i for i, u in enumerate(active_demands)}
+    demand_index = {u: i for i, u in enumerate(demands)}
 
     adj = {i: [] for i in range(total_vertices)}
 
@@ -69,7 +60,7 @@ def compute_automorphism_symmetry(
         ci = center_index[c]
         row = inst.dist[c]
 
-        for u in active_demands:
+        for u in demands:
             if row[u] <= radius + EPS:
                 ui = nC + demand_index[u]
                 adj[ci].append(ui)
@@ -80,7 +71,7 @@ def compute_automorphism_symmetry(
     # ----------------------------------
     baseP = nC + nD
 
-    for k, (a, b) in enumerate(pair_list):
+    for k, (a, b) in enumerate(at_least_pairs):
         pv = baseP + k
         ia = center_index[a]
         ib = center_index[b]
@@ -136,7 +127,7 @@ def automorphism_symmetry_breaking(
     cnf,
     radius,
     candidates,
-    active_demands,
+    demands,
     at_least_pairs,
     mode="chain",
 ):
@@ -146,7 +137,7 @@ def automorphism_symmetry_breaking(
         self,
         radius,
         candidates,
-        active_demands,
+        demands,
         at_least_pairs,
     )
 

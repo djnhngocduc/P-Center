@@ -9,7 +9,7 @@
     "name": "u1060",
     "tsplib": "instances/dataset/TSPLIB/u1060.tsp",
     "p": 20,
-    "seed_radius": 1580.795158203617
+    "seed_radius": 1580.7951582036167
   },
   {
     "name": "u1060",
