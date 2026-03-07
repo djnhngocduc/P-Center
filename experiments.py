@@ -21,6 +21,7 @@ import traceback
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
+_USE_SEED_RADIUS = False
 INF = 10 ** 12
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,11 +81,10 @@ def load_instance(inst_desc):
 
         inst.radii = sorted(set(inst.radii), reverse=True)
 
-        sr = float(inst_desc["seed_radius"])
-
-        seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
-
-        if seed_idx is None:
+        if _USE_SEED_RADIUS:
+            sr = float(inst_desc["seed_radius"])
+            seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
+        else:
             seed_idx = len(inst.radii) - 1
 
     elif "orlib" in inst_desc:
@@ -110,10 +110,10 @@ def load_instance(inst_desc):
 
         inst.radii = sorted(radii_set, reverse=True)
 
-        sr = int(inst_desc["seed_radius"])
-        seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
-
-        if seed_idx is None:
+        if _USE_SEED_RADIUS:
+            sr = int(inst_desc["seed_radius"])
+            seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
+        else:
             seed_idx = len(inst.radii) - 1
     else:
         raise ValueError("Instance description must contain 'tsplib' or 'orlib'")
