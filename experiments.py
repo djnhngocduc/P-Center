@@ -85,7 +85,7 @@ def load_instance(inst_desc):
             sr = float(inst_desc["seed_radius"])
             seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
         else:
-            seed_idx = len(inst.radii) - 1
+            seed_idx = 0
 
     elif "orlib" in inst_desc:
         t0 = time.time()
@@ -114,7 +114,7 @@ def load_instance(inst_desc):
             sr = int(inst_desc["seed_radius"])
             seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
         else:
-            seed_idx = len(inst.radii) - 1
+            seed_idx = 0
     else:
         raise ValueError("Instance description must contain 'tsplib' or 'orlib'")
 
@@ -229,10 +229,13 @@ def search_min_radius_parallel(
     mgr=None,
     cancel_dict=None
 ):
+    search_t0 = time.perf_counter()
+
     radii = inst.radii
     nR = len(radii)
     if nR == 0:
-        return "infeasible", None, None, None, None, None, None, None
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, None, None, None, None, search_elapsed
 
     decided = {}
     best_nvars = None
@@ -437,7 +440,8 @@ def search_min_radius_parallel(
                 "[RESULT] infeasible (no SAT found at any radius)",
                 flush=True
             )
-            return "infeasible", None, best_nvars, best_nclauses, None, None, None, None
+            search_elapsed = time.perf_counter() - search_t0
+            return "infeasible", None, best_nvars, best_nclauses, None, None, search_elapsed
 
     best_centers = sat_solutions.get(best_sat_idx, None)
     best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
@@ -451,15 +455,155 @@ def search_min_radius_parallel(
     best_nvars = sat_nvars.get(best_sat_idx, None)
     best_nclauses = sat_nclauses.get(best_sat_idx, None)
 
+    search_elapsed = time.perf_counter() - search_t0
     return (
         "OK",
         radii[best_sat_idx],
         best_nvars,
         best_nclauses,
         best_centers,
-        best_sat_cpu
+        best_sat_cpu,
+        search_elapsed
     )
 
+def search_min_radius_binary(
+    inst,
+    encoding,
+    solver_name,
+    time_limit,
+    *,
+    radii_workers,
+    seed_idx=None,
+    mgr=None,
+    cancel_dict=None
+):
+    search_t0 = time.perf_counter()
+
+    radii = inst.radii
+    nR = len(radii)
+    if nR == 0:
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, None, None, None, None, search_elapsed
+
+    best_sat_idx = None
+    best_centers = None
+    best_sat_cpu = None
+    best_nvars = None
+    best_nclauses = None
+
+    lo = 0
+    hi = nR - 1
+
+    print(
+        f"[BINARY-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
+        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]}",
+        flush=True
+    )
+
+    def ensure_event(idx):
+        if cancel_dict is not None:
+            if idx not in cancel_dict:
+                cancel_dict[idx] = mgr.Event()
+            return cancel_dict[idx]
+        return None
+
+    with ProcessPoolExecutor(
+        max_workers=1,
+        initializer=_pool_initializer,
+        initargs=(cancel_dict, inst)
+    ) as ex:
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            R = radii[mid]
+
+            ensure_event(mid)
+
+            print(
+                f"[BINARY-STEP] lo={lo} hi={hi} mid={mid} R={R}",
+                flush=True
+            )
+
+            fut = ex.submit(
+                _solve_radius_worker_proc,
+                mid,
+                encoding,
+                solver_name,
+                R,
+                time_limit,
+            )
+
+            try:
+                idx, Rret, status, cpu_sec, nvars, nclauses, centers = fut.result()
+            except Exception:
+                tb = traceback.format_exc()
+                print(
+                    f"[BINARY-EXCEPTION] mid={mid} R={R}\n{tb}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                idx, Rret = mid, R
+                status, cpu_sec, nvars, nclauses, centers = (
+                    "error",
+                    0.0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+
+            print(
+                f"[BINARY-DONE] idx={idx} R={Rret} status={status} cpu={cpu_sec:.6f}s",
+                flush=True
+            )
+
+            if status == "sat":
+                best_sat_idx = idx
+                best_centers = centers
+                best_sat_cpu = cpu_sec
+                best_nvars = nvars
+                best_nclauses = nclauses
+
+                # thử radius nhỏ hơn nữa => idx lớn hơn
+                lo = idx + 1
+
+            elif status == "unsat":
+                # radius này quá nhỏ, phải quay về radius lớn hơn => idx nhỏ hơn
+                hi = idx - 1
+
+            elif status in ("timeout", "error"):
+                # Nếu đã có SAT trước đó thì fallback về SAT tốt nhất hiện có
+                if best_sat_idx is not None:
+                    print(
+                        f"[BINARY-FALLBACK] stop on {status}, "
+                        f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                        flush=True
+                    )
+                    break
+
+                search_elapsed = time.perf_counter() - search_t0
+                return status, None, nvars, nclauses, None, cpu_sec, search_elapsed
+
+    if best_sat_idx is None:
+        print("[BINARY-RESULT] infeasible (no SAT found)", flush=True)
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, None, None, None, None, search_elapsed
+
+    print(
+        f"[BINARY-RESULT] status=OK best_idx={best_sat_idx} "
+        f"best_R={radii[best_sat_idx]} cpu={best_sat_cpu}",
+        flush=True
+    )
+
+    search_elapsed = time.perf_counter() - search_t0
+    return (
+        "OK",
+        radii[best_sat_idx],
+        best_nvars,
+        best_nclauses,
+        best_centers,
+        best_sat_cpu,
+        search_elapsed,
+    )
 
 def _write_dimacs(cnf, path):
     nvars = cnf.nv
@@ -487,7 +631,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
             file=sys.stderr,
             flush=True
         )
-        return "error", 0.0, 0.0, None
+        return "error", 0.0, None
 
     base_tmp = _LOCAL_TMPDIR if _LOCAL_TMPDIR is not None else tempfile.gettempdir()
 
@@ -549,7 +693,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
         except Exception:
             pass
         print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        return "timeout", (time_limit if time_limit else 0.0), (time_limit if time_limit else 0.0), None
+        return "timeout", (time_limit if time_limit else 0.0), None
     finally:
         try:
             if os.path.exists(cnf_path):
@@ -810,6 +954,13 @@ def parse_args():
         help="Time limit per radius solve (seconds)",
     )
     ap.add_argument(
+        "--search-mode",
+        type=str,
+        default="parallel",
+        choices=["parallel", "binary"],
+        help="Search strategy: parallel (current batch-parallel scan) or binary",
+    )
+    ap.add_argument(
         "--radii-workers",
         type=int,
         default=8,
@@ -829,6 +980,7 @@ def run_experiment(
     encodings,
     solvers,
     time_limit,
+    search_mode,
     radii_workers,
     *,
     mgr,
@@ -848,10 +1000,19 @@ def run_experiment(
             for run_id in range(1):
                 print(
                     f"[RUN] instance={inst_desc['name']} run_id={run_id + 1} "
-                    f"encoding={encoding} solver={solver_name}",
+                    f"encoding={encoding} solver={solver_name} search={search_mode}",
                     flush=True
                 )
-                status, best_radius, nvars, nclauses, centers, best_sat_cpu = search_min_radius_parallel(
+                if search_mode == "parallel":
+                    search_fn = search_min_radius_parallel
+                elif search_mode == "binary":
+                    search_fn = search_min_radius_binary
+                else:
+                    raise ValueError(f"Unknown search_mode: {search_mode}")
+
+                cancel_dict.clear()
+                
+                status, best_radius, nvars, nclauses, centers, best_sat_cpu, search_elapsed = search_fn(
                     inst,
                     encoding,
                     solver_name,
@@ -865,7 +1026,7 @@ def run_experiment(
                 print(
                     f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"status={status} best_radius={best_radius} "
-                    f"cpu={best_sat_cpu}",
+                    f"cpu={best_sat_cpu} search_time={search_elapsed:.6f}s",
                     flush=True
                 )
 
@@ -876,10 +1037,12 @@ def run_experiment(
                         "p": inst.p,
                         "encoding": encoding,
                         "solver": solver_name,
+                        "search_mode": search_mode,
                         "run_id": run_id + 1,
                         "status": status,
                         "best_radius": best_radius if best_radius is not None else None,
                         "cpu": best_sat_cpu,
+                        "search_time": search_elapsed,
                         "nvars": nvars,
                         "nclauses": nclauses,
                         "centers": json.dumps(centers if centers is not None else []),
@@ -890,10 +1053,11 @@ def run_experiment(
 
     return results
 
-def sort_key(enc_sol):
-    enc, sol = enc_sol
+def sort_key(enc_sol_mode):
+    enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 4, "kissat": 5}
-    return solver_rank.get(sol, 99), sol, enc
+    mode_rank = {"parallel": 0, "binary": 1}
+    return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
     cfg_runs = defaultdict(list)
@@ -905,7 +1069,8 @@ def print_instance_summary_for_console(all_results_for_inst):
         inst_name = r["instance"]
         n = r["n"]
         p = r["p"]
-        cfg_runs[(r["encoding"], r["solver"])].append(r)
+        mode = r.get("search_mode", "parallel")
+        cfg_runs[(r["encoding"], r["solver"], mode)].append(r)
 
     cfg_bestR = {}
     for key, runs in cfg_runs.items():
@@ -917,12 +1082,11 @@ def print_instance_summary_for_console(all_results_for_inst):
         print(f"instance={inst_name} n={n} p={p} : no feasible radius found")
         return
 
-    gR = min(cfg_bestR.values())
-
     method_cols = sorted(cfg_runs.keys(), key=sort_key)
 
-    for (enc, sol) in method_cols:
-        runs = cfg_runs[(enc, sol)]
+    for (enc, sol, mode) in method_cols:
+        runs = cfg_runs[(enc, sol, mode)]
+        gR = cfg_bestR.get((enc, sol, mode))
 
         cpus = [
             x.get("cpu")
@@ -932,22 +1096,26 @@ def print_instance_summary_for_console(all_results_for_inst):
             and x.get("cpu") is not None
         ]
 
-        if cpus:
-            mean_cpu = _stats.mean(cpus)
-            print(
-                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
-                f"radius={gR} cpu_mean={mean_cpu:.3f}s "
-            )
-        else:
-            print(
-                f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol}: "
-                f"radius={gR} cpu_mean=- "
-            )
+        times = [
+            x.get("search_time")
+            for x in runs
+            if x.get("status") == "OK"
+            and x.get("best_radius") == gR
+            and x.get("search_time") is not None
+        ]
+
+        cpu_str = f"{_stats.mean(cpus):.3f}s" if cpus else "-"
+        time_str = f"{_stats.mean(times):.3f}s" if times else "-"
+
+        print(
+            f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol} mode={mode}: "
+            f"radius={gR} cpu_mean={cpu_str} search_mean={time_str}"
+        )
 
 
 def write_paper_table(all_results, out_csv_path: str):
-    def method_label(solver: str, enc: str) -> str:
-        return f"{solver} {enc}"
+    def method_label(solver: str, enc: str, mode: str) -> str:
+        return f"{solver} {enc} {mode}"
 
     cfg_runs = defaultdict(list)
     all_instances = set()
@@ -960,14 +1128,16 @@ def write_paper_table(all_results, out_csv_path: str):
         p = r["p"]
         enc = r["encoding"]
         sol = r["solver"]
+        mode = r.get("search_mode", "parallel")
 
         all_instances.add((inst, n, p))
-        methods_seen.add((enc, sol))
+        methods_seen.add((enc, sol, mode))
 
         br = r.get("best_radius")
         if br is None:
             continue
-        key = (inst, n, p, enc, sol)
+
+        key = (inst, n, p, enc, sol, mode)
         cfg_runs[key].append(r)
 
     cfg_bestR = {}
@@ -977,90 +1147,127 @@ def write_paper_table(all_results, out_csv_path: str):
             cfg_bestR[key] = min(brs)
 
     global_bestR = {}
-    for (inst, n, p, enc, sol), R in cfg_bestR.items():
-        if (inst, n, p) not in global_bestR or R < global_bestR[(inst, n, p)]:
-            global_bestR[(inst, n, p)] = R
+    for (inst, n, p, enc, sol, mode), R in cfg_bestR.items():
+        k = (inst, n, p, enc, sol, mode)
+        if k not in global_bestR or R < global_bestR[k]:
+            global_bestR[k] = R
 
     cpus_at_global = defaultdict(list)
-    for (inst, n, p, enc, sol), runs in cfg_runs.items():
-        gR = global_bestR.get((inst, n, p))
+    search_times_at_global = defaultdict(list)
+
+    for (inst, n, p, enc, sol, mode), runs in cfg_runs.items():
+        gR = global_bestR.get((inst, n, p, enc, sol, mode))
         if gR is None:
             continue
+
         for x in runs:
             if x.get("status") != "OK":
                 continue
             if x.get("best_radius") != gR:
                 continue
-            key_size = (inst, n, p, enc)
-            if key_size not in sizes_at_global:
-                sizes_at_global[key_size] = x.get("nvars"), x.get("nclauses")
-            
-            cpu_v = x.get("cpu")
 
+            key_size = (inst, n, p, enc, sol, mode)
+            if key_size not in sizes_at_global:
+                sizes_at_global[key_size] = (x.get("nvars"), x.get("nclauses"))
+
+            cpu_v = x.get("cpu")
             if cpu_v is not None:
-                cpus_at_global[(inst, n, p, enc, sol)].append(cpu_v)
+                cpus_at_global[(inst, n, p, enc, sol, mode)].append(cpu_v)
+
+            search_v = x.get("search_time")
+            if search_v is not None:
+                search_times_at_global[(inst, n, p, enc, sol, mode)].append(search_v)
 
     method_cols = sorted(methods_seen, key=sort_key)
-    encodings_only = sorted({enc for (enc, _) in methods_seen})
-    header = ["Instance", "n", "p", "radius"]
 
-    for enc in encodings_only:
-        header.append(f"{enc} #vars")
-        header.append(f"{enc} #clauses")
+    header = ["Instance", "n", "p"]
 
-    for (enc, sol) in method_cols:
-        m = method_label(solver=sol, enc=enc)
-        header.append(m)
+    for (enc, sol, mode) in method_cols:
+        m = method_label(solver=sol, enc=enc, mode=mode)
+        header.append(f"{m} radius")
+        header.append(f"{m} #vars")
+        header.append(f"{m} #clauses")
+        header.append(f"{m} cpu")
+        header.append(f"{m} search")
 
     rows = []
 
-    solved_cpu = {method_label(sol, enc): [] for (enc, sol) in method_cols}
+    solved_cpu = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
+    solved_search = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
 
-    for (inst, n, p) in sorted(
-        all_instances, key=lambda x: (str(x[0]), x[1], x[2])
-    ):
-        gR = global_bestR.get((inst, n, p))
+    for (inst, n, p) in sorted(all_instances, key=lambda x: (str(x[0]), x[1], x[2])):
         row = {
             "Instance": inst,
             "n": n,
             "p": p,
-            "radius": gR if gR is not None else "-",
         }
 
-        for enc in encodings_only:
-            nv, nc = sizes_at_global.get((inst, n, p, enc), ("-", "-"))
-            row[f"{enc} #vars"] = nv
-            row[f"{enc} #clauses"] = nc
+        for (enc, sol, mode) in method_cols:
+            m = method_label(solver=sol, enc=enc, mode=mode)
 
-        for (enc, sol) in method_cols:
-            m = method_label(solver=sol, enc=enc)
+            radius_col = f"{m} radius"
+            vars_col = f"{m} #vars"
+            clauses_col = f"{m} #clauses"
+            cpu_col = f"{m} cpu"
+            search_col = f"{m} search"
 
-            ts_cpu = cpus_at_global.get((inst, n, p, enc, sol), [])
+            gR = global_bestR.get((inst, n, p, enc, sol, mode))
+            row[radius_col] = gR if gR is not None else "-"
 
+            nv, nc = sizes_at_global.get((inst, n, p, enc, sol, mode), ("-", "-"))
+            row[vars_col] = nv
+            row[clauses_col] = nc
+
+            ts_cpu = cpus_at_global.get((inst, n, p, enc, sol, mode), [])
             if ts_cpu:
                 mean_cpu = _stats.mean(ts_cpu)
-                row[m] = f"{mean_cpu:.3f}"
+                row[cpu_col] = f"{mean_cpu:.3f}"
                 solved_cpu[m].append(mean_cpu)
             else:
-                row[m] = "-"
+                row[cpu_col] = "-"
+
+            ts_search = search_times_at_global.get((inst, n, p, enc, sol, mode), [])
+            if ts_search:
+                mean_search = _stats.mean(ts_search)
+                row[search_col] = f"{mean_search:.3f}"
+                solved_search[m].append(mean_search)
+            else:
+                row[search_col] = "-"
 
         rows.append(row)
 
-    footer_num = {"Instance": "Num.", "n": "", "p": "", "radius": ""}
-    footer_avg = {"Instance": "Avg.", "n": "", "p": "", "radius": ""}
+    footer_num = {"Instance": "Num.", "n": "", "p": ""}
+    footer_avg = {"Instance": "Avg.", "n": "", "p": ""}
 
-    for (enc, sol) in method_cols:
-        m = method_label(solver=sol, enc=enc)
+    for (enc, sol, mode) in method_cols:
+        m = method_label(solver=sol, enc=enc, mode=mode)
+
+        radius_col = f"{m} radius"
+        vars_col = f"{m} #vars"
+        clauses_col = f"{m} #clauses"
+        cpu_col = f"{m} cpu"
+        search_col = f"{m} search"
+
+        footer_num[radius_col] = ""
+        footer_num[vars_col] = ""
+        footer_num[clauses_col] = ""
+        footer_avg[radius_col] = ""
+        footer_avg[vars_col] = ""
+        footer_avg[clauses_col] = ""
 
         lst_cpu = solved_cpu.get(m, [])
+        lst_search = solved_search.get(m, [])
 
-        footer_num[m] = str(len(lst_cpu)) if lst_cpu else "0"
-        footer_avg[m] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
+        footer_num[cpu_col] = str(len(lst_cpu)) if lst_cpu else "0"
+        footer_avg[cpu_col] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
+
+        footer_num[search_col] = str(len(lst_search)) if lst_search else "0"
+        footer_avg[search_col] = f"{_stats.mean(lst_search):.3f}" if lst_search else "-"
 
     rows.append(footer_num)
     rows.append(footer_avg)
 
-    with open(out_csv_path, "w", newline="") as f:
+    with open(out_csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=header)
         w.writeheader()
         for r in rows:
@@ -1090,6 +1297,7 @@ if __name__ == "__main__":
                 args.encodings,
                 args.solvers,
                 args.time_limit,
+                args.search_mode,
                 args.radii_workers,
                 mgr=MGR,
                 cancel_dict=CANCEL,
