@@ -2,80 +2,111 @@ from collections import defaultdict
 
 EPS = 1e-12
 
+
 # --------------------------------------------------
-# AUTOMORPHISM SYMMETRY (pynauty)
+# Extract orbit ids safely from pynauty.autgrp
 # --------------------------------------------------
 
 def _extract_orbit_ids_from_autgrp_result(result):
-    """
-    pynauty.autgrp(g) thường trả tuple dạng:
-      (generators, grpsize1, grpsize2, orbits, numorbits)
-    => phần tử cuối (numorbits) là int, còn 'orbits' (list/iterable) nằm ở -2.
-
-    Nhưng để an toàn theo nhiều version/fork:
-    - Nếu result[-1] là int -> lấy result[-2]
-    - Nếu result[-1] iterable -> lấy result[-1]
-    - Nếu vẫn không đúng -> raise để dễ debug.
-    """
     if not isinstance(result, (tuple, list)) or len(result) == 0:
-        raise TypeError(f"autgrp returned unexpected type/value: {type(result)} {result!r}")
+        raise TypeError(f"autgrp returned unexpected: {type(result)} {result!r}")
 
     last = result[-1]
 
-    # Trường hợp phổ biến: last là numorbits (int)
     if isinstance(last, int):
         if len(result) < 2:
-            raise TypeError(f"autgrp returned only an int: {result!r}")
+            raise TypeError(f"autgrp malformed: {result!r}")
         orbit_ids = result[-2]
     else:
         orbit_ids = last
 
-    # orbit_ids phải iterable (list/tuple)
     if isinstance(orbit_ids, int):
-        raise TypeError(
-            "orbit_ids is still int after extraction. "
-            f"autgrp returned: {result!r}"
-        )
+        raise TypeError(f"orbit_ids malformed: {result!r}")
 
-    # Một số version trả orbits dạng list length = nVertices,
-    # mỗi phần tử là orbit-id (int)
     return orbit_ids
 
 
-def compute_automorphism_symmetry(inst, radius, candidates, demands):
+# --------------------------------------------------
+# FULL CNF-FAITHFUL AUTOMORPHISM
+# --------------------------------------------------
+
+def compute_automorphism_symmetry(
+    inst,
+    radius,
+    candidates,
+    active_demands,
+    at_least_pairs
+):
     import pynauty
 
-    nC = len(candidates)
-    nD = len(demands)
-    total_vertices = nC + nD
+    cand_set = set(candidates)
 
+    nC = len(candidates)
+    nD = len(active_demands)
+
+    # keep only relevant pairs among candidates
+    pair_list = [
+        (a, b)
+        for (a, b) in at_least_pairs
+        if a in cand_set and b in cand_set
+    ]
+
+    nP = len(pair_list)
+
+    total_vertices = nC + nD + nP
     if total_vertices == 0:
         return []
 
     center_index = {c: i for i, c in enumerate(candidates)}
-    demand_index = {u: i for i, u in enumerate(demands)}
+    demand_index = {u: i for i, u in enumerate(active_demands)}
 
     adj = {i: [] for i in range(total_vertices)}
 
+    # ----------------------------------
+    # 1) center — demand edges
+    # ----------------------------------
     for c in candidates:
         ci = center_index[c]
         row = inst.dist[c]
 
-        for u in demands:
+        for u in active_demands:
             if row[u] <= radius + EPS:
-                ui = demand_index[u] + nC
+                ui = nC + demand_index[u]
                 adj[ci].append(ui)
                 adj[ui].append(ci)
 
-    coloring = [
-        set(range(0, nC)),
-        set(range(nC, nC + nD))
-    ]
+    # ----------------------------------
+    # 2) pair-gadget — center edges
+    # ----------------------------------
+    baseP = nC + nD
+
+    for k, (a, b) in enumerate(pair_list):
+        pv = baseP + k
+        ia = center_index[a]
+        ib = center_index[b]
+
+        adj[pv].append(ia)
+        adj[ia].append(pv)
+
+        adj[pv].append(ib)
+        adj[ib].append(pv)
+
+    # ----------------------------------
+    # Coloring: centers / demands / pair-nodes
+    # ----------------------------------
+    coloring = []
+
+    if nC > 0:
+        coloring.append(set(range(0, nC)))
+    if nD > 0:
+        coloring.append(set(range(nC, nC + nD)))
+    if nP > 0:
+        coloring.append(set(range(nC + nD, total_vertices)))
 
     g = pynauty.Graph(
         number_of_vertices=total_vertices,
         adjacency_dict=adj,
-        vertex_coloring=coloring
+        vertex_coloring=coloring,
     )
 
     result = pynauty.autgrp(g)
@@ -86,6 +117,7 @@ def compute_automorphism_symmetry(inst, radius, candidates, demands):
         orbit_dict[oid].append(v)
 
     auto_classes = []
+
     for orbit in orbit_dict.values():
         centers = [candidates[v] for v in orbit if v < nC]
         if len(centers) >= 2:
@@ -94,25 +126,29 @@ def compute_automorphism_symmetry(inst, radius, candidates, demands):
     auto_classes.sort()
     return auto_classes
 
-# ============================================================
-# Symmetry breaking using automorphism orbits
-# ============================================================
+
+# --------------------------------------------------
+# Symmetry breaking clauses
+# --------------------------------------------------
 
 def automorphism_symmetry_breaking(
     self,
     cnf,
-    radius: float,
-    candidates, demands,
-    mode: str = "chain",   # "chain" or "leader"
+    radius,
+    candidates,
+    active_demands,
+    at_least_pairs,
+    mode="chain",
 ):
-    """
-    Break FULL structural automorphism symmetry of the coverage graph.
-    No dominance. No identical-only logic.
-    """
-
     ylit = self.y_lit_all
 
-    orbits = compute_automorphism_symmetry(self, radius, candidates, demands)
+    orbits = compute_automorphism_symmetry(
+        self,
+        radius,
+        candidates,
+        active_demands,
+        at_least_pairs,
+    )
 
     if not orbits:
         return
@@ -124,7 +160,6 @@ def automorphism_symmetry_breaking(
             leader = group[0]
             for c in group[1:]:
                 cnf.append([-ylit[c], ylit[leader]])
-
-        else:  # chain mode
+        else:  # chain
             for a, b in zip(group, group[1:]):
                 cnf.append([-ylit[b], ylit[a]])
