@@ -61,32 +61,34 @@ class PCenterSAT:
     def _encode_cnf(self, radius: float, encoding: str):
         cnf = CNF()
 
-        Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(self.dist, self.n, radius)
+        # Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(self.dist, self.n, radius)
 
-        cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
+        # cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
 
-        for clause in cnf_extra:
-            cnf.append(clause)
+        # for clause in cnf_extra:
+        #     cnf.append(clause)
 
-        for c in Nc:
-            cnf.append([self._y(c)])
+        # for c in Nc:
+        #     cnf.append([self._y(c)])
 
-        for d in Nd:
-            cnf.append([-self._y(d)])
+        # for d in Nd:
+        #     cnf.append([-self._y(d)])
 
-        Npp = (enabled_centers - Nc) - Nd
-        candidates = sorted(list(Npp))
+        # Npp = (enabled_centers - Nc) - Nd
+        # candidates = sorted(list(Npp))
 
-        covered = [False] * self.n
-        if Nc:
-            # only check u in demands
-            for c in Nc:
-                row = self.dist[c]
-                for u in demands:
-                    if not covered[u] and row[u] <= radius + 1e-12:
-                        covered[u] = True
+        # covered = [False] * self.n
+        # if Nc:
+        #     # only check u in demands
+        #     for c in Nc:
+        #         row = self.dist[c]
+        #         for u in demands:
+        #             if not covered[u] and row[u] <= radius + 1e-12:
+        #                 covered[u] = True
         
-        active_demands = [u for u in demands if not covered[u]]
+        # active_demands = [u for u in demands if not covered[u]]
+        active_demands = list(range(self.n))
+        candidates = set(range(self.n))
 
         # ---- demand coverage clauses using candidates list (avoid set scans)
         for u in active_demands:
@@ -99,13 +101,14 @@ class PCenterSAT:
                 return None, {}
             cnf.append(allowed)
 
-        bound = self.p - len(Nc)      
+        # bound = self.p - len(Nc)      
+        bound = self.p
         if bound < 0:
             if DEBUG_REDUCTION:
                 print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
             return None, {}
         
-        automorphism_symmetry_breaking(self, cnf, radius, candidates, demands, at_least_pairs, mode="chain")
+        # automorphism_symmetry_breaking(self, cnf, radius, candidates, demands, at_least_pairs, mode="chain")
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
@@ -150,7 +153,7 @@ class PCenterSAT:
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
 
         info = {
-            "Nc": Nc, "Nd": Nd,
+            # "Nc": Nc, "Nd": Nd,
             "candidates": candidates,
             "bound": bound,
             "y": [self._y(j) for j in range(self.n)]
