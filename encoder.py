@@ -103,10 +103,10 @@ class PCenterSAT:
 
         # bound = self.p - len(Nc)      
         bound = self.p
-        if bound < 0:
-            if DEBUG_REDUCTION:
-                print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
-            return None, {}
+        # if bound < 0:
+        #     if DEBUG_REDUCTION:
+        #         print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
+        #     return None, {}
         
         # automorphism_symmetry_breaking(self, cnf, radius, candidates, demands, at_least_pairs, mode="chain")
 
