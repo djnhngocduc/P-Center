@@ -42,7 +42,8 @@ class PCenterSAT:
             for j, (xj, yj) in enumerate(coords):
                 dx = xi - xj
                 dy = yi - yj
-                D[i][j] = math.hypot(dx, dy)
+                d = math.hypot(dx, dy)
+                D[i][j] = math.floor(100.0 * d + 0.5) / 100.0
         return PCenterSAT(D, p)
 
     @staticmethod

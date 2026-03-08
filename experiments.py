@@ -18,6 +18,7 @@ import csv
 import resource
 import atexit, shutil
 import traceback
+import math
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
@@ -82,7 +83,7 @@ def load_instance(inst_desc):
         inst.radii = sorted(set(inst.radii), reverse=True)
 
         if _USE_SEED_RADIUS:
-            sr = float(inst_desc["seed_radius"])
+            sr = math.floor(100.0 * float(inst_desc["seed_radius"]) + 0.5) / 100.0
             seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
         else:
             seed_idx = 0
