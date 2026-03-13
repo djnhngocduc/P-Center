@@ -1327,11 +1327,13 @@ def run_experiment(
     cancel_dict
 ):
     results = []
+    load_t0 = time.perf_counter()
     inst, seed_idx = load_instance(inst_desc)
+    load_time = time.perf_counter() - load_t0
     print(
         f"[RUN-EXPERIMENT] {inst_desc['name']} "
         f"seed_idx={seed_idx} seed_radius={inst.radii[seed_idx]} "
-        f"p={inst.p} n={inst.n}",
+        f"p={inst.p} n={inst.n} load_time={load_time:.6f}s",
         flush=True
     )
 
@@ -1365,10 +1367,13 @@ def run_experiment(
                     cancel_dict=cancel_dict,
                 )
 
+                total_time = load_time + search_elapsed
+
                 print(
                     f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"status={status} best_radius={best_radius} "
-                    f"cpu={best_sat_cpu} search_time={search_elapsed:.6f}s",
+                    f"cpu={best_sat_cpu} load_time={load_time:.6f}s " 
+                    f"search_time={search_elapsed:.6f}s total_time={total_time:.6f}s",
                     flush=True
                 )
 
@@ -1384,7 +1389,9 @@ def run_experiment(
                         "status": status,
                         "best_radius": best_radius if best_radius is not None else None,
                         "cpu": best_sat_cpu,
+                        "load_time": load_time,
                         "search_time": search_elapsed,
+                        "total_time": total_time,
                         "nvars": nvars,
                         "nclauses": nclauses,
                         "centers": json.dumps(centers if centers is not None else []),
@@ -1438,7 +1445,15 @@ def print_instance_summary_for_console(all_results_for_inst):
             and x.get("cpu") is not None
         ]
 
-        times = [
+        loads = [
+            x.get("load_time")
+            for x in runs
+            if x.get("status") == "OK"
+            and x.get("best_radius") == gR
+            and x.get("load_time") is not None
+        ]
+
+        searches = [
             x.get("search_time")
             for x in runs
             if x.get("status") == "OK"
@@ -1446,12 +1461,23 @@ def print_instance_summary_for_console(all_results_for_inst):
             and x.get("search_time") is not None
         ]
 
+        totals = [
+            x.get("total_time")
+            for x in runs
+            if x.get("status") == "OK"
+            and x.get("best_radius") == gR
+            and x.get("total_time") is not None
+        ]
+
         cpu_str = f"{_stats.mean(cpus):.3f}s" if cpus else "-"
-        time_str = f"{_stats.mean(times):.3f}s" if times else "-"
+        load_str = f"{_stats.mean(loads):.3f}s" if loads else "-"
+        search_str = f"{_stats.mean(searches):.3f}s" if searches else "-"
+        total_str = f"{_stats.mean(totals):.3f}s" if totals else "-"
 
         print(
             f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol} mode={mode}: "
-            f"radius={gR} cpu_mean={cpu_str} search_mean={time_str}"
+            f"radius={gR} cpu_mean={cpu_str} load_mean={load_str} "
+            f"search_mean={search_str} total_mean={total_str}"
         )
 
 
@@ -1495,7 +1521,9 @@ def write_paper_table(all_results, out_csv_path: str):
             global_bestR[k] = R
 
     cpus_at_global = defaultdict(list)
+    load_times_at_global = defaultdict(list)
     search_times_at_global = defaultdict(list)
+    total_times_at_global = defaultdict(list)
 
     for (inst, n, p, enc, sol, mode), runs in cfg_runs.items():
         gR = global_bestR.get((inst, n, p, enc, sol, mode))
@@ -1516,9 +1544,17 @@ def write_paper_table(all_results, out_csv_path: str):
             if cpu_v is not None:
                 cpus_at_global[(inst, n, p, enc, sol, mode)].append(cpu_v)
 
+            load_v = x.get("load_time")
+            if load_v is not None:
+                load_times_at_global[(inst, n, p, enc, sol, mode)].append(load_v)
+
             search_v = x.get("search_time")
             if search_v is not None:
                 search_times_at_global[(inst, n, p, enc, sol, mode)].append(search_v)
+
+            total_v = x.get("total_time")
+            if total_v is not None:
+                total_times_at_global[(inst, n, p, enc, sol, mode)].append(total_v)
 
     method_cols = sorted(methods_seen, key=sort_key)
 
@@ -1530,12 +1566,16 @@ def write_paper_table(all_results, out_csv_path: str):
         header.append(f"{m} #vars")
         header.append(f"{m} #clauses")
         header.append(f"{m} cpu")
+        header.append(f"{m} load")
         header.append(f"{m} search")
+        header.append(f"{m} total")
 
     rows = []
 
     solved_cpu = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
+    solved_load = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
     solved_search = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
+    solved_total = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
 
     for (inst, n, p) in sorted(all_instances, key=lambda x: (str(x[0]), x[1], x[2])):
         row = {
@@ -1551,7 +1591,9 @@ def write_paper_table(all_results, out_csv_path: str):
             vars_col = f"{m} #vars"
             clauses_col = f"{m} #clauses"
             cpu_col = f"{m} cpu"
+            load_col = f"{m} load"
             search_col = f"{m} search"
+            total_col = f"{m} total"
 
             gR = global_bestR.get((inst, n, p, enc, sol, mode))
             row[radius_col] = gR if gR is not None else "-"
@@ -1568,6 +1610,14 @@ def write_paper_table(all_results, out_csv_path: str):
             else:
                 row[cpu_col] = "-"
 
+            ts_load = load_times_at_global.get((inst, n, p, enc, sol, mode), [])
+            if ts_load:
+                mean_load = _stats.mean(ts_load)
+                row[load_col] = f"{mean_load:.3f}"
+                solved_load[m].append(mean_load)
+            else:
+                row[load_col] = "-"
+
             ts_search = search_times_at_global.get((inst, n, p, enc, sol, mode), [])
             if ts_search:
                 mean_search = _stats.mean(ts_search)
@@ -1575,6 +1625,14 @@ def write_paper_table(all_results, out_csv_path: str):
                 solved_search[m].append(mean_search)
             else:
                 row[search_col] = "-"
+
+            ts_total = total_times_at_global.get((inst, n, p, enc, sol, mode), [])
+            if ts_total:
+                mean_total = _stats.mean(ts_total)
+                row[total_col] = f"{mean_total:.3f}"
+                solved_total[m].append(mean_total)
+            else:
+                row[total_col] = "-"
 
         rows.append(row)
 
@@ -1588,7 +1646,9 @@ def write_paper_table(all_results, out_csv_path: str):
         vars_col = f"{m} #vars"
         clauses_col = f"{m} #clauses"
         cpu_col = f"{m} cpu"
+        load_col = f"{m} load"
         search_col = f"{m} search"
+        total_col = f"{m} total"
 
         footer_num[radius_col] = ""
         footer_num[vars_col] = ""
@@ -1598,13 +1658,21 @@ def write_paper_table(all_results, out_csv_path: str):
         footer_avg[clauses_col] = ""
 
         lst_cpu = solved_cpu.get(m, [])
+        lst_load = solved_load.get(m, [])
         lst_search = solved_search.get(m, [])
+        lst_total = solved_total.get(m, [])
 
         footer_num[cpu_col] = str(len(lst_cpu)) if lst_cpu else "0"
         footer_avg[cpu_col] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
 
+        footer_num[load_col] = str(len(lst_load)) if lst_load else "0"
+        footer_avg[load_col] = f"{_stats.mean(lst_load):.3f}" if lst_load else "-"
+
         footer_num[search_col] = str(len(lst_search)) if lst_search else "0"
         footer_avg[search_col] = f"{_stats.mean(lst_search):.3f}" if lst_search else "-"
+
+        footer_num[total_col] = str(len(lst_total)) if lst_total else "0"
+        footer_avg[total_col] = f"{_stats.mean(lst_total):.3f}" if lst_total else "-"
 
     rows.append(footer_num)
     rows.append(footer_avg)
