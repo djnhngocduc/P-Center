@@ -1,10 +1,10 @@
-import argparse 
+import argparse
 import json
 import csv
-from reduction import compute_reduction 
 from collections import defaultdict
 
 EPS = 1e-12
+
 
 # --------------------------------------------------
 # Extract orbit ids safely from pynauty.autgrp
@@ -28,72 +28,57 @@ def _extract_orbit_ids_from_autgrp_result(result):
 
     return orbit_ids
 
+
 # --------------------------------------------------
-# FULL CNF-FAITHFUL AUTOMORPHISM
+# CURRENT-CNF-FAITHFUL AUTOMORPHISM
+# Graph = candidate centers + active demands
+# edge(c,u) iff dist[c][u] <= radius
 # --------------------------------------------------
 
 def compute_automorphism_symmetry(
     inst,
     radius,
     candidates,
-    demands,
-    at_least_pairs
+    active_demands,
 ):
     import pynauty
 
-    nC = len(candidates)
-    nD = len(demands)
-    nP = len(at_least_pairs)
+    candidates = sorted(candidates)
+    active_demands = sorted(active_demands)
 
-    total_vertices = nC + nD + nP
+    nC = len(candidates)
+    nD = len(active_demands)
+
+    total_vertices = nC + nD
     if total_vertices == 0:
         return []
 
     center_index = {c: i for i, c in enumerate(candidates)}
-    demand_index = {u: i for i, u in enumerate(demands)}
+    demand_index = {u: i for i, u in enumerate(active_demands)}
 
     adj = {i: [] for i in range(total_vertices)}
 
     # ----------------------------------
-    # 1) center — demand edges
+    # center -- demand edges
     # ----------------------------------
     for c in candidates:
         ci = center_index[c]
         row = inst.dist[c]
 
-        for u in demands:
+        for u in active_demands:
             if row[u] <= radius + EPS:
                 ui = nC + demand_index[u]
                 adj[ci].append(ui)
                 adj[ui].append(ci)
 
     # ----------------------------------
-    # 2) pair-gadget — center edges
-    # ----------------------------------
-    baseP = nC + nD
-
-    for k, (a, b) in enumerate(at_least_pairs):
-        pv = baseP + k
-        ia = center_index[a]
-        ib = center_index[b]
-
-        adj[pv].append(ia)
-        adj[ia].append(pv)
-
-        adj[pv].append(ib)
-        adj[ib].append(pv)
-
-    # ----------------------------------
-    # Coloring: centers / demands / pair-nodes
+    # Coloring: centers / demands
     # ----------------------------------
     coloring = []
-
     if nC > 0:
         coloring.append(set(range(0, nC)))
     if nD > 0:
         coloring.append(set(range(nC, nC + nD)))
-    if nP > 0:
-        coloring.append(set(range(nC + nD, total_vertices)))
 
     g = pynauty.Graph(
         number_of_vertices=total_vertices,
@@ -124,29 +109,27 @@ def compute_automorphism_symmetry(
 # --------------------------------------------------
 
 def automorphism_symmetry_breaking(
-    self,
+    inst,
     cnf,
     radius,
     candidates,
-    demands,
-    at_least_pairs,
+    active_demands,
     mode="chain",
 ):
-    ylit = self.y_lit_all
+    ylit = inst.y_lit_all
 
     orbits = compute_automorphism_symmetry(
-        self,
-        radius,
-        candidates,
-        demands,
-        at_least_pairs,
+        inst=inst,
+        radius=radius,
+        candidates=candidates,
+        active_demands=active_demands,
     )
 
     if not orbits:
         return
 
     for group in orbits:
-        group.sort()
+        group = sorted(group)
 
         if mode == "leader":
             leader = group[0]
@@ -155,14 +138,16 @@ def automorphism_symmetry_breaking(
         else:  # chain
             for a, b in zip(group, group[1:]):
                 cnf.append([-ylit[b], ylit[a]])
-    
+
+
 def load_instance_and_seed_radius(inst_desc):
     from experiments import load_instance
     inst, seed_idx = load_instance(inst_desc)
     radius = inst.radii[seed_idx]
     return inst, radius
 
-def main(): 
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--instances", required=True)
     parser.add_argument("--out-prefix", default="symmetry")
@@ -183,21 +168,16 @@ def main():
         inst, radius = load_instance_and_seed_radius(inst_desc)
         print(f"  mapped radius = {radius}")
 
-        Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(
-            inst.dist, inst.n, radius
-        )
-
-        # candidates like encoder.py (enabled minus forced)
-        candidates = sorted(enabled_centers - Nc - Nd)
+        # match current encoder.py
+        candidates = list(range(inst.n))
+        active_demands = list(range(inst.n))
         num_candidates = len(candidates)
 
-        # AUTOMORPHISM CNF-FAITHFUL (new)
         auto_classes = compute_automorphism_symmetry(
-            inst,
-            radius,
-            candidates,
-            demands,
-            at_least_pairs,
+            inst=inst,
+            radius=radius,
+            candidates=candidates,
+            active_demands=active_demands,
         )
 
         total_auto_nodes = sum(len(c) for c in auto_classes)
@@ -206,20 +186,19 @@ def main():
 
         auto_ratio = (total_auto_nodes / num_candidates) if num_candidates > 0 else 0.0
 
-        # -------- summary row --------
         summary_rows.append({
             "instance": name,
             "p": p,
             "radius_used": radius,
             "symmetry_type": "automorphism",
             "num_candidates": num_candidates,
+            "num_demands": len(active_demands),
             "num_symmetry_classes": num_auto_classes,
             "total_symmetric_nodes": total_auto_nodes,
             "max_class_size": max_auto_class,
             "symmetry_ratio": auto_ratio,
         })
 
-        # -------- detail rows --------
         for idx, centers in enumerate(auto_classes, start=1):
             detail_rows.append({
                 "instance": name,
@@ -231,9 +210,6 @@ def main():
                 "centers": " ".join(map(str, centers)),
             })
 
-    # ------------------------------
-    # Write CSV (same as old)
-    # ------------------------------
     if summary_rows:
         summary_path = f"{args.out_prefix}_summary.csv"
         with open(summary_path, "w", newline="", encoding="utf-8") as f:
