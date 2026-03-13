@@ -110,16 +110,16 @@ class PCenterSAT:
         #         print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
         #     return None, {}
         
-        automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
+        # automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
 
-        # automorphism_full_lex_leader_symmetry_breaking(
-        #     inst=self,
-        #     cnf=cnf,
-        #     radius=radius,
-        #     candidates=candidates,
-        #     active_demands=active_demands,
-        #     verbose=False,
-        # )
+        automorphism_full_lex_leader_symmetry_breaking(
+            inst=self,
+            cnf=cnf,
+            radius=radius,
+            candidates=candidates,
+            active_demands=active_demands,
+            verbose=False,
+        )
 
         # automorphism_full_full_lex_leader_symmetry_breaking(
         #     inst=self,
