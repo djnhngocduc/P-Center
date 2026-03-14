@@ -217,6 +217,140 @@ def compute_apsp_dijkstra(n: int, edges: List[Tuple[int, int, float]]) -> List[L
 
     return D
 
+def search_min_radius_incremental(
+    inst,
+    encoding,
+    solver_name,
+    time_limit,
+    *,
+    radii_workers,
+    seed_idx=None,
+    mgr=None,
+    cancel_dict=None
+):
+    """
+    Incremental SAT with assumptions:
+      - build one master CNF once
+      - one selector literal a_k per radius index k
+      - solve with assumptions=[a_k]
+
+    Only supports INTERNAL PySAT solvers, not external solvers like kissat/sparrow2riss.
+    """
+    search_t0 = time.perf_counter()
+
+    if solver_name in EXTERNAL_SOLVERS:
+        raise ValueError(
+            f"Incremental mode does not support external solver '{solver_name}'. "
+            f"Use an internal PySAT solver such as glucose4/maplecm/maplechrono."
+        )
+
+    cnf, info = inst._build_incremental_master_cnf(encoding=encoding)
+    radii = info["radii"]
+    radius_sel_lits = info["radius_sel_lits"]
+    y_vars = info["y"]
+
+    nR = len(radii)
+    if nR == 0:
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, cnf.nv, len(cnf.clauses), None, None, search_elapsed
+
+    lo = 0
+    hi = nR - 1
+
+    best_sat_idx = None
+    best_centers = None
+    best_sat_cpu = None
+
+    print(
+        f"[INC-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
+        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR} "
+        f"clauses={len(cnf.clauses)} vars={cnf.nv}",
+        flush=True
+    )
+
+    with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            a_mid = radius_sel_lits[mid]
+            R = radii[mid]
+
+            print(
+                f"[INC-STEP] lo={lo} hi={hi} mid={mid} R={R}",
+                flush=True
+            )
+
+            timer = None
+            try:
+                if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
+                    timer = threading.Timer(time_limit, solver.interrupt)
+                    timer.start()
+                    cpu0 = _cpu_self_seconds()
+                    sat = solver.solve_limited(
+                        assumptions=[a_mid],
+                        expect_interrupt=True
+                    )
+                    cpu1 = _cpu_self_seconds()
+                else:
+                    cpu0 = _cpu_self_seconds()
+                    sat = solver.solve(assumptions=[a_mid])
+                    cpu1 = _cpu_self_seconds()
+            finally:
+                if timer:
+                    timer.cancel()
+
+            cpu_sec = cpu1 - cpu0
+
+            if sat is None:
+                print(
+                    f"[INC-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
+                    flush=True
+                )
+                search_elapsed = time.perf_counter() - search_t0
+                return "timeout", None, cnf.nv, len(cnf.clauses), None, cpu_sec, search_elapsed
+
+            if sat:
+                model = solver.get_model() or []
+                model_set = set(model)
+                centers = sorted([j for j, v in enumerate(y_vars) if v in model_set])
+
+                best_sat_idx = mid
+                best_centers = centers
+                best_sat_cpu = cpu_sec
+
+                print(
+                    f"[INC-DONE] idx={mid} R={R} status=sat cpu={cpu_sec:.6f}s centers={centers}",
+                    flush=True
+                )
+
+                lo = mid + 1
+            else:
+                print(
+                    f"[INC-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
+                    flush=True
+                )
+                hi = mid - 1
+
+    if best_sat_idx is None:
+        print("[INC-RESULT] infeasible (no SAT found)", flush=True)
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, cnf.nv, len(cnf.clauses), None, None, search_elapsed
+
+    best_radius = radii[best_sat_idx]
+    print(
+        f"[INC-RESULT] status=OK best_idx={best_sat_idx} best_R={best_radius} cpu={best_sat_cpu}",
+        flush=True
+    )
+
+    search_elapsed = time.perf_counter() - search_t0
+    return (
+        "OK",
+        best_radius,
+        cnf.nv,
+        len(cnf.clauses),
+        best_centers,
+        best_sat_cpu,
+        search_elapsed,
+    )
 
 def search_min_radius_parallel(
     inst,
@@ -1296,8 +1430,8 @@ def parse_args():
         "--search-mode",
         type=str,
         default="parallel",
-        choices=["parallel", "binary", "kary"],
-        help="Search strategy: parallel, binary, or kary",
+        choices=["parallel", "binary", "kary", "incremental"],
+        help="Search strategy: parallel, binary, or kary, or incremental",
     )
     ap.add_argument(
         "--radii-workers",
@@ -1350,6 +1484,8 @@ def run_experiment(
                     search_fn = search_min_radius_binary
                 elif search_mode == "kary":
                     search_fn = search_min_radius_kary
+                elif search_mode == "incremental":
+                    search_fn = search_min_radius_incremental
                 else:
                     raise ValueError(f"Unknown search_mode: {search_mode}")
 

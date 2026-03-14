@@ -259,6 +259,98 @@ class PCenterSAT:
             cnf.append([int(v) for v in cls])
 
         cnf.nv = max(getattr(cnf, "nv", 0), int(max_var))
+    
+    def _new_aux_var(self, cnf):
+        base = self.y_lit_all[-1] if self.n > 0 else 0
+        cnf.nv = max(getattr(cnf, "nv", 0), base) + 1
+        return cnf.nv
+
+    def _build_incremental_master_cnf(self, encoding: str):
+        """
+        Build ONE master CNF for all radii using selector literals a_k.
+
+        For each radius index k and demand u:
+            (-a_k OR OR_{c : dist[c][u] <= radii[k]} y_c)
+
+        At solve time, we call:
+            solver.solve(assumptions=[a_k])
+
+        radii are stored in descending order:
+            radii[0] > radii[1] > ... > radii[m-1]
+        """
+        cnf = CNF()
+
+        candidates = list(range(self.n))
+        active_demands = list(range(self.n))
+
+        lits = [self.y_lit_all[j] for j in candidates]
+        bound = self.p
+
+        existing_max = getattr(cnf, "nv", 0)
+        max_y = self.y_lit_all[-1] if self.n > 0 else existing_max
+        cnf.nv = max(existing_max, max_y)
+
+        # selector literal a_k for each radius index k
+        radius_sel_lits = []
+        for _ in range(len(self.radii)):
+            cnf.nv += 1
+            radius_sel_lits.append(cnf.nv)
+
+        # guarded coverage clauses
+        for k, radius in enumerate(self.radii):
+            a_k = radius_sel_lits[k]
+
+            for u in active_demands:
+                allowed = []
+                for c in candidates:
+                    if self.dist[c][u] <= radius + 1e-12:
+                        allowed.append(self.y_lit_all[c])
+
+                if not allowed:
+                    # if radius k is activated, impossible immediately
+                    cnf.append([-a_k])
+                else:
+                    cnf.append([-a_k] + allowed)
+
+        # one global AtMost-p on y
+        top_id = max(getattr(cnf, "nv", 0), max_y)
+
+        if encoding == "pysat_kmtotalizer":
+            enc_kind = CardEncType.kmtotalizer
+            with _PYSAT_CNF_LOCK:
+                amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                cnf.extend(amo.clauses)
+                cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
+        elif encoding == "pysat_mtotalizer":
+            enc_kind = CardEncType.mtotalizer
+            with _PYSAT_CNF_LOCK:
+                amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                cnf.extend(amo.clauses)
+                cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
+        elif encoding == "pysat_totalizer":
+            enc_kind = CardEncType.totalizer
+            with _PYSAT_CNF_LOCK:
+                amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                cnf.extend(amo.clauses)
+                cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
+        else:
+            raise ValueError(
+                f"Incremental mode currently supports only "
+                f"pysat_totalizer / pysat_mtotalizer / pysat_kmtotalizer, got {encoding}"
+            )
+
+        info = {
+            "candidates": candidates,
+            "active_demands": active_demands,
+            "bound": bound,
+            "y": [self._y(j) for j in range(self.n)],
+            "radius_sel_lits": radius_sel_lits,
+            "radii": list(self.radii),
+        }
+        return cnf, info
 
 
 
