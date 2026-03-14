@@ -142,7 +142,7 @@ def automorphism_symmetry_breaking(
 
 def load_instance_and_seed_radius(inst_desc):
     from experiments import load_instance
-    inst, seed_idx = load_instance(inst_desc)
+    inst, seed_idx = load_instance(inst_desc, use_seed_radius=True)
     radius = inst.radii[seed_idx]
     return inst, radius
 

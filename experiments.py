@@ -22,7 +22,6 @@ import math
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
-_USE_SEED_RADIUS = False
 INF = 10 ** 12
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,14 +74,14 @@ def load_instance_data(inst_file: str):
         return json.load(f)
 
 
-def load_instance(inst_desc):
+def load_instance(inst_desc, use_seed_radius: bool = False):
     if "tsplib" in inst_desc:
         coords = load_tsplib_coords(inst_desc["tsplib"])
         inst = PCenterSAT.from_coordinates(coords, inst_desc["p"])
 
         inst.radii = sorted(set(inst.radii), reverse=True)
 
-        if _USE_SEED_RADIUS:
+        if use_seed_radius:
             sr = math.floor(100.0 * float(inst_desc["seed_radius"]) + 0.5) / 100.0
             seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
         else:
@@ -111,7 +110,7 @@ def load_instance(inst_desc):
 
         inst.radii = sorted(radii_set, reverse=True)
 
-        if _USE_SEED_RADIUS:
+        if use_seed_radius:
             sr = int(inst_desc["seed_radius"])
             seed_idx = next((i for i, r in enumerate(inst.radii) if r <= sr), None)
         else:
@@ -1328,7 +1327,7 @@ def run_experiment(
 ):
     results = []
     load_t0 = time.perf_counter()
-    inst, seed_idx = load_instance(inst_desc)
+    inst, seed_idx = load_instance(inst_desc, use_seed_radius=False)
     load_time = time.perf_counter() - load_t0
     print(
         f"[RUN-EXPERIMENT] {inst_desc['name']} "
