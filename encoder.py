@@ -13,8 +13,6 @@ from pypblib.pblib import PBConfig, Pb2cnf
 
 # from reduction import compute_reduction
 from sb import automorphism_symmetry_breaking
-from sb_full import automorphism_full_lex_leader_symmetry_breaking
-from sb_full_full import automorphism_full_full_lex_leader_symmetry_breaking
 
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
@@ -111,25 +109,6 @@ class PCenterSAT:
         #     return None, {}
         
         # automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
-
-        # automorphism_full_lex_leader_symmetry_breaking(
-        #     inst=self,
-        #     cnf=cnf,
-        #     radius=radius,
-        #     candidates=candidates,
-        #     active_demands=active_demands,
-        #     verbose=False,
-        # )
-
-        automorphism_full_full_lex_leader_symmetry_breaking(
-            inst=self,
-            cnf=cnf,
-            radius=radius,
-            candidates=candidates,
-            active_demands=active_demands,
-            verbose=False,
-            max_group_size=None,   # hoặc đặt 1 ngưỡng để chặn nổ group
-        )
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
