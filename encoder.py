@@ -108,7 +108,7 @@ class PCenterSAT:
         #         print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
         #     return None, {}
         
-        # automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
+        automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
