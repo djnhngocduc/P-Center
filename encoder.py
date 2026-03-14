@@ -335,6 +335,8 @@ class PCenterSAT:
                 amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
                 cnf.extend(amo.clauses)
                 cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+        elif encoding == "nsc":
+            self._encode_atmost_nsc(cnf, lits, bound)
 
         else:
             raise ValueError(
