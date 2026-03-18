@@ -12,7 +12,7 @@ from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
 # from reduction import compute_reduction
-from sb import automorphism_symmetry_breaking
+# from sb import automorphism_symmetry_breaking
 
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
@@ -25,6 +25,8 @@ class PCenterSAT:
         self.dist: List[List[float]] = dist
         self.radii: List[float] = self._compute_radii(dist)
         self.y_lit_all = [self._y(i) for i in range(self.n)] 
+
+        self._incremental_cover_order = None
 
     def _y(self, j: int) -> int:
         # 1..n
@@ -108,7 +110,7 @@ class PCenterSAT:
         #         print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
         #     return None, {}
         
-        automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
+        # automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
@@ -260,99 +262,124 @@ class PCenterSAT:
 
         cnf.nv = max(getattr(cnf, "nv", 0), int(max_var))
     
-    def _new_aux_var(self, cnf):
-        base = self.y_lit_all[-1] if self.n > 0 else 0
-        cnf.nv = max(getattr(cnf, "nv", 0), base) + 1
-        return cnf.nv
-
-    def _build_incremental_master_cnf(self, encoding: str):
+    def _prepare_incremental_cover_order(self):
         """
-        Build ONE master CNF for all radii using selector literals a_k.
+        Precompute, for each demand u, the centers c sorted by distance dist[c][u].
+        Since reduction is OFF, candidates = all vertices and active_demands = all vertices.
+        """
+        if self._incremental_cover_order is not None:
+            return
 
-        For each radius index k and demand u:
-            (-a_k OR OR_{c : dist[c][u] <= radii[k]} y_c)
+        cover_order = []
+        for u in range(self.n):
+            arr = []
+            for c in range(self.n):
+                arr.append((self.dist[c][u], c))
+            arr.sort(key=lambda x: x[0])
+            cover_order.append(arr)
 
-        At solve time, we call:
-            solver.solve(assumptions=[a_k])
+        self._incremental_cover_order = cover_order
 
-        radii are stored in descending order:
-            radii[0] > radii[1] > ... > radii[m-1]
+    def _build_incremental_base_cnf(self, encoding: str):
+        """
+        Build the permanent part of incremental SAT:
+          - y variables
+          - one global AtMost-p over all y
+        No coverage clauses here.
         """
         cnf = CNF()
 
         candidates = list(range(self.n))
         active_demands = list(range(self.n))
-
         lits = [self.y_lit_all[j] for j in candidates]
         bound = self.p
 
-        existing_max = getattr(cnf, "nv", 0)
-        max_y = self.y_lit_all[-1] if self.n > 0 else existing_max
-        cnf.nv = max(existing_max, max_y)
-
-        # selector literal a_k for each radius index k
-        radius_sel_lits = []
-        for _ in range(len(self.radii)):
-            cnf.nv += 1
-            radius_sel_lits.append(cnf.nv)
-
-        # guarded coverage clauses
-        for k, radius in enumerate(self.radii):
-            a_k = radius_sel_lits[k]
-
-            for u in active_demands:
-                allowed = []
-                for c in candidates:
-                    if self.dist[c][u] <= radius + 1e-12:
-                        allowed.append(self.y_lit_all[c])
-
-                if not allowed:
-                    # if radius k is activated, impossible immediately
-                    cnf.append([-a_k])
-                else:
-                    cnf.append([-a_k] + allowed)
-
-        # one global AtMost-p on y
-        top_id = max(getattr(cnf, "nv", 0), max_y)
+        max_y = self.y_lit_all[-1] if self.n > 0 else 0
+        cnf.nv = max(getattr(cnf, "nv", 0), max_y)
+        top_id = cnf.nv
 
         if encoding == "pysat_kmtotalizer":
             enc_kind = CardEncType.kmtotalizer
             with _PYSAT_CNF_LOCK:
-                amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                amo = CardEnc.atmost(
+                    lits=lits, bound=bound, top_id=top_id, encoding=enc_kind
+                )
                 cnf.extend(amo.clauses)
                 cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
 
         elif encoding == "pysat_mtotalizer":
             enc_kind = CardEncType.mtotalizer
             with _PYSAT_CNF_LOCK:
-                amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                amo = CardEnc.atmost(
+                    lits=lits, bound=bound, top_id=top_id, encoding=enc_kind
+                )
                 cnf.extend(amo.clauses)
                 cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
 
         elif encoding == "pysat_totalizer":
             enc_kind = CardEncType.totalizer
             with _PYSAT_CNF_LOCK:
-                amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
+                amo = CardEnc.atmost(
+                    lits=lits, bound=bound, top_id=top_id, encoding=enc_kind
+                )
                 cnf.extend(amo.clauses)
                 cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
+
         elif encoding == "nsc":
             self._encode_atmost_nsc(cnf, lits, bound)
 
+        elif encoding == "pypb_bdd":
+            enc_kind = PBEncType.bdd
+            with _PYSAT_CNF_LOCK:
+                pbcnf = PBEnc.atmost(
+                    lits=lits,
+                    weights=[1] * len(lits),
+                    bound=bound,
+                    top_id=top_id,
+                    encoding=enc_kind,
+                )
+                cnf.extend(pbcnf.clauses)
+                cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
+
+        elif encoding == "pb_bdd":
+            self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
+
         else:
-            raise ValueError(
-                f"Incremental mode currently supports only "
-                f"pysat_totalizer / pysat_mtotalizer / pysat_kmtotalizer, got {encoding}"
-            )
+            raise ValueError(f"Unsupported encoding for incremental mode: {encoding}")
 
         info = {
             "candidates": candidates,
             "active_demands": active_demands,
             "bound": bound,
             "y": [self._y(j) for j in range(self.n)],
-            "radius_sel_lits": radius_sel_lits,
             "radii": list(self.radii),
         }
         return cnf, info
+
+    def _build_incremental_guarded_clauses(self, radius: float, selector_lit: int):
+        """
+        Build guarded coverage clauses for ONE radius:
+            (-selector_lit OR y_c1 OR y_c2 OR ...)
+        using precomputed sorted cover order.
+
+        This matches the repo idea you sent:
+          - AtMost is permanent
+          - coverage is added lazily per tested radius
+        """
+        self._prepare_incremental_cover_order()
+
+        clauses = []
+        for u in range(self.n):
+            allowed = [-selector_lit]
+            for dcu, c in self._incremental_cover_order[u]:
+                if dcu <= radius + 1e-12:
+                    allowed.append(self.y_lit_all[c])
+                else:
+                    break
+            clauses.append(allowed)
+
+        return clauses
+        
 
 
 

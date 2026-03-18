@@ -229,11 +229,13 @@ def search_min_radius_incremental(
     cancel_dict=None
 ):
     """
-    Incremental SAT with assumptions:
-      - build one master CNF once
-      - one selector literal a_k per radius index k
-      - solve with assumptions=[a_k]
+    Lazy incremental SAT with assumptions:
+      - build permanent AtMost-p only once
+      - at each tested radius R, add guarded coverage clauses:
+            (-alpha_R OR coverage_clause_for_R)
+      - solve with assumptions=[alpha_R]
 
+    This follows the repo style you sent.
     Only supports INTERNAL PySAT solvers, not external solvers like kissat/sparrow2riss.
     """
     search_t0 = time.perf_counter()
@@ -244,15 +246,14 @@ def search_min_radius_incremental(
             f"Use an internal PySAT solver such as glucose4/maplecm/maplechrono."
         )
 
-    cnf, info = inst._build_incremental_master_cnf(encoding=encoding)
+    base_cnf, info = inst._build_incremental_base_cnf(encoding=encoding)
     radii = info["radii"]
-    radius_sel_lits = info["radius_sel_lits"]
     y_vars = info["y"]
 
     nR = len(radii)
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, cnf.nv, len(cnf.clauses), None, None, search_elapsed
+        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
 
     lo = 0
     hi = nR - 1
@@ -261,18 +262,40 @@ def search_min_radius_incremental(
     best_centers = None
     best_sat_cpu = None
 
+    next_var = base_cnf.nv + 1
+    tested = {}   # mid -> selector lit, just in case
+
     print(
         f"[INC-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
         f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR} "
-        f"clauses={len(cnf.clauses)} vars={cnf.nv}",
+        f"base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv}",
         flush=True
     )
 
-    with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
+    with Solver(name=solver_name, bootstrap_with=base_cnf.clauses) as solver:
         while lo <= hi:
             mid = (lo + hi) // 2
-            a_mid = radius_sel_lits[mid]
             R = radii[mid]
+
+            if mid not in tested:
+                alpha = next_var
+                next_var += 1
+                tested[mid] = alpha
+
+                step_clauses = inst._build_incremental_guarded_clauses(
+                    radius=R,
+                    selector_lit=alpha,
+                )
+                for cl in step_clauses:
+                    solver.add_clause(cl)
+
+                print(
+                    f"[INC-ADD] idx={mid} R={R} selector={alpha} "
+                    f"added_clauses={len(step_clauses)}",
+                    flush=True
+                )
+            else:
+                alpha = tested[mid]
 
             print(
                 f"[INC-STEP] lo={lo} hi={hi} mid={mid} R={R}",
@@ -280,25 +303,27 @@ def search_min_radius_incremental(
             )
 
             timer = None
+            cpu0 = None
+            cpu1 = None
             try:
                 if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
                     cpu0 = _cpu_self_seconds()
                     sat = solver.solve_limited(
-                        assumptions=[a_mid],
+                        assumptions=[alpha],
                         expect_interrupt=True
                     )
                     cpu1 = _cpu_self_seconds()
                 else:
                     cpu0 = _cpu_self_seconds()
-                    sat = solver.solve(assumptions=[a_mid])
+                    sat = solver.solve(assumptions=[alpha])
                     cpu1 = _cpu_self_seconds()
             finally:
                 if timer:
                     timer.cancel()
 
-            cpu_sec = cpu1 - cpu0
+            cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
 
             if sat is None:
                 print(
@@ -306,7 +331,7 @@ def search_min_radius_incremental(
                     flush=True
                 )
                 search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, cnf.nv, len(cnf.clauses), None, cpu_sec, search_elapsed
+                return "timeout", None, next_var - 1, None, None, cpu_sec, search_elapsed
 
             if sat:
                 model = solver.get_model() or []
@@ -322,22 +347,29 @@ def search_min_radius_incremental(
                     flush=True
                 )
 
+                # radii descending: SAT => try smaller radius => move right
                 lo = mid + 1
             else:
                 print(
                     f"[INC-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
                     flush=True
                 )
+
+                # radii descending: UNSAT => need larger radius => move left
                 hi = mid - 1
 
     if best_sat_idx is None:
         print("[INC-RESULT] infeasible (no SAT found)", flush=True)
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, cnf.nv, len(cnf.clauses), None, None, search_elapsed
+        return "infeasible", None, next_var - 1, None, None, None, search_elapsed
 
     best_radius = radii[best_sat_idx]
+    nvars = next_var - 1
+    nclauses = len(base_cnf.clauses) + (len(tested) * inst.n)
+
     print(
-        f"[INC-RESULT] status=OK best_idx={best_sat_idx} best_R={best_radius} cpu={best_sat_cpu}",
+        f"[INC-RESULT] status=OK best_idx={best_sat_idx} "
+        f"best_R={best_radius} cpu={best_sat_cpu}",
         flush=True
     )
 
@@ -345,8 +377,8 @@ def search_min_radius_incremental(
     return (
         "OK",
         best_radius,
-        cnf.nv,
-        len(cnf.clauses),
+        nvars,
+        nclauses,
         best_centers,
         best_sat_cpu,
         search_elapsed,
@@ -1540,7 +1572,7 @@ def run_experiment(
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 4, "kissat": 5}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2}
+    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
