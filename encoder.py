@@ -262,6 +262,11 @@ class PCenterSAT:
 
         cnf.nv = max(getattr(cnf, "nv", 0), int(max_var))
     
+    def _new_aux_var(self, cnf):
+        base = self.y_lit_all[-1] if self.n > 0 else 0
+        cnf.nv = max(getattr(cnf, "nv", 0), base) + 1
+        return cnf.nv
+    
     def _prepare_incremental_cover_order(self):
         """
         Precompute, for each demand u, the centers c sorted by distance dist[c][u].
@@ -379,6 +384,36 @@ class PCenterSAT:
             clauses.append(allowed)
 
         return clauses
+    
+    def _build_incremental2_base_cnf(self, encoding: str):
+        """
+        Build the permanent part of incremental2 SAT:
+          - one global AtMost-p over all y
+          - unguarded coverage clauses for the largest radius radii[0]
+
+        Later, smaller radii are enforced lazily by guarded coverage clauses
+        under assumptions, so this mode keeps the user's idea of having the
+        upper-bound coverage already loaded in the solver.
+        """
+        cnf, info = self._build_incremental_base_cnf(encoding=encoding)
+
+        if not self.radii:
+            return cnf, info
+
+        radius_ub = self.radii[0]
+        for u in range(self.n):
+            allowed = []
+            for c in range(self.n):
+                if self.dist[c][u] <= radius_ub + 1e-12:
+                    allowed.append(self.y_lit_all[c])
+            if not allowed:
+                cnf.append([])
+            else:
+                cnf.append(allowed)
+
+        info = dict(info)
+        info["base_radius"] = radius_ub
+        return cnf, info
         
 
 
