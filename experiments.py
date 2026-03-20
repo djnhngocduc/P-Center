@@ -1419,7 +1419,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     return status, cpu_time, (model_lits if status == "sat" else None)
 
-def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1):
+def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1, data=None):
     pid = os.getpid()
 
     if cplex is None:
@@ -1429,7 +1429,9 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1):
             ".../cplex/python/<python-version>/x86-64_linux"
         )
 
-    data = inst._build_setcover_data(radius)
+    if data is None:
+        data = inst._build_setcover_data(radius)
+    
     if data is None:
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(no coverage)",
@@ -1451,11 +1453,6 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1):
         model.parameters.timelimit.set(float(time_limit))
     if threads and threads > 0:
         model.parameters.threads.set(int(threads))
-
-    try:
-        model.parameters.mip.limits.solutions.set(1)
-    except Exception:
-        pass
 
     names = [f"x_{j}" for j in range(n)]
     model.variables.add(
@@ -1491,34 +1488,33 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1):
     nclauses = model.linear_constraints.get_num()
 
     try:
-        status_name = model.solution.status[status_code]
+        status_name = model.solution.get_status_string(status_code)
     except Exception:
-        status_name = str(status_code)
+        try:
+            status_name = model.solution.status[status_code]
+        except Exception:
+            status_name = str(status_code)
     status_name = str(status_name).lower()
 
-    if status_code in {
-        model.solution.status.MIP_optimal,
-        model.solution.status.optimal,
-        model.solution.status.MIP_optimal_tolerance,
-        model.solution.status.MIP_feasible,
-        model.solution.status.feasible,
-    } or ("optimal" in status_name) or ("feasible" in status_name and "infeasible" not in status_name):
+    try:
+        primal_feasible = model.solution.is_primal_feasible()
+    except Exception:
+        primal_feasible = False
+
+    if primal_feasible or ("optimal" in status_name) or ("feasible" in status_name and "infeasible" not in status_name):
         vals = model.solution.get_values()
         centers = [j for j, v in enumerate(vals) if v > 0.5]
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> SAT(CPLEX) cpu={cpu_sec:.6f}s centers={centers}",
+            f"-> SAT(CPLEX) cpu={cpu_sec:.6f}s status={status_name} centers={centers}",
             flush=True
         )
         return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
 
-    if status_code in {
-        model.solution.status.MIP_infeasible,
-        model.solution.status.infeasible,
-    } or ("infeasible" in status_name):
+    if "infeasible" in status_name:
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> UNSAT(CPLEX) cpu={cpu_sec:.6f}s",
+            f"-> UNSAT(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
             flush=True
         )
         return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
@@ -1564,6 +1560,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 radius=radius,
                 time_limit=time_limit,
                 threads=int(os.getenv("PCENTER_CPLEX_THREADS", "1")),
+                data=data,
             )
         
         cnf, varmap = _INST_SHARED._encode_cnf(radius, encoding)
