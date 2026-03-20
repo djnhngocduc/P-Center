@@ -1789,6 +1789,8 @@ def run_experiment(
     mgr,
     cancel_dict
 ):
+    if "cplex" in solvers and search_mode != "binary":
+        raise ValueError("CPLEX backend currently supports only binary search.")
     results = []
     load_t0 = time.perf_counter()
     inst, seed_idx = load_instance(inst_desc, use_seed_radius=False)
@@ -1800,8 +1802,9 @@ def run_experiment(
         flush=True
     )
 
-    for encoding in encodings:
-        for solver_name in solvers:
+    for solver_name in solvers:
+        solver_encodings = encodings if solver_name != "cplex" else ["setcover"]
+        for encoding in solver_encodings:
             for run_id in range(5):
                 if solver_name == "cplex":
                     os.environ["PCENTER_CPLEX_THREADS"] = str(max(1, int(cplex_threads)))
