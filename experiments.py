@@ -20,6 +20,11 @@ import atexit, shutil
 import traceback
 import math
 
+try:
+    import cplex
+except Exception:
+    cplex = None
+
 _CANCEL_SHARED = None
 _INST_SHARED = None
 INF = 10 ** 12
@@ -1414,6 +1419,124 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     return status, cpu_time, (model_lits if status == "sat" else None)
 
+def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1):
+    pid = os.getpid()
+
+    if cplex is None:
+        raise ImportError(
+            "Could not import the IBM CPLEX Python API. "
+            "Make sure cplex_studio2211 is installed and PYTHONPATH includes "
+            ".../cplex/python/<python-version>/x86-64_linux"
+        )
+
+    data = inst._build_setcover_data(radius)
+    if data is None:
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(no coverage)",
+            flush=True
+        )
+        return idx, radius, "unsat", 0.0, inst.n, 0, None
+
+    n = data["n"]
+    p = data["p"]
+    cover_rows = data["cover_rows"]
+
+    model = cplex.Cplex()
+    model.set_results_stream(None)
+    model.set_warning_stream(None)
+    model.set_error_stream(None)
+    model.set_log_stream(None)
+
+    if time_limit and time_limit > 0:
+        model.parameters.timelimit.set(float(time_limit))
+    if threads and threads > 0:
+        model.parameters.threads.set(int(threads))
+
+    try:
+        model.parameters.mip.limits.solutions.set(1)
+    except Exception:
+        pass
+
+    names = [f"x_{j}" for j in range(n)]
+    model.variables.add(
+        obj=[0.0] * n,
+        lb=[0.0] * n,
+        ub=[1.0] * n,
+        types=[model.variables.type.binary] * n,
+        names=names,
+    )
+
+    for u, allowed in cover_rows:
+        model.linear_constraints.add(
+            lin_expr=[cplex.SparsePair(ind=allowed, val=[1.0] * len(allowed))],
+            senses=["G"],
+            rhs=[1.0],
+            names=[f"cover_{u}"],
+        )
+
+    model.linear_constraints.add(
+        lin_expr=[cplex.SparsePair(ind=list(range(n)), val=[1.0] * n)],
+        senses=["L"],
+        rhs=[float(p)],
+        names=["atmost_p"],
+    )
+
+    cpu0 = _cpu_self_seconds()
+    model.solve()
+    cpu1 = _cpu_self_seconds()
+    cpu_sec = cpu1 - cpu0
+
+    status_code = model.solution.get_status()
+    nvars = model.variables.get_num()
+    nclauses = model.linear_constraints.get_num()
+
+    try:
+        status_name = model.solution.status[status_code]
+    except Exception:
+        status_name = str(status_code)
+    status_name = str(status_name).lower()
+
+    if status_code in {
+        model.solution.status.MIP_optimal,
+        model.solution.status.optimal,
+        model.solution.status.MIP_optimal_tolerance,
+        model.solution.status.MIP_feasible,
+        model.solution.status.feasible,
+    } or ("optimal" in status_name) or ("feasible" in status_name and "infeasible" not in status_name):
+        vals = model.solution.get_values()
+        centers = [j for j, v in enumerate(vals) if v > 0.5]
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> SAT(CPLEX) cpu={cpu_sec:.6f}s centers={centers}",
+            flush=True
+        )
+        return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+
+    if status_code in {
+        model.solution.status.MIP_infeasible,
+        model.solution.status.infeasible,
+    } or ("infeasible" in status_name):
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> UNSAT(CPLEX) cpu={cpu_sec:.6f}s",
+            flush=True
+        )
+        return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+
+    if ("time limit" in status_name) or ("abort" in status_name) or ("limit" in status_name):
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> TIMEOUT(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+            flush=True
+        )
+        return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+
+    print(
+        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+        f"-> ERROR(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+        flush=True
+    )
+    return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
 def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     pid = os.getpid()
@@ -1425,6 +1548,24 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
 
     try:
         global _INST_SHARED
+
+        if solver_name == "cplex":
+            data = _INST_SHARED._build_setcover_data(radius)
+            print(
+                f"[ENCODE-CPLEX] idx={idx} R={radius} "
+                f"candidates={0 if data is None else len(data.get('candidates', []))} "
+                f"bound={None if data is None else data.get('p')} "
+                f"rows={0 if data is None else len(data.get('cover_rows', []))}",
+                flush=True
+            )
+            return _solve_radius_cplex(
+                inst=_INST_SHARED,
+                idx=idx,
+                radius=radius,
+                time_limit=time_limit,
+                threads=int(os.getenv("PCENTER_CPLEX_THREADS", "1")),
+            )
+        
         cnf, varmap = _INST_SHARED._encode_cnf(radius, encoding)
 
         print(
@@ -1602,8 +1743,8 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat"],
-        help="SAT solvers to use",
+        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex"],
+        help="Solvers to use",
     )
     ap.add_argument(
         "--time-limit",
@@ -1625,6 +1766,12 @@ def parse_args():
         help="Parallel radii workers",
     )
     ap.add_argument(
+        "--cplex-threads",
+        type=int,
+        default=1,
+        help="Threads for the CPLEX backend (binary search only).",
+    )
+    ap.add_argument(
         "--out",
         type=str,
         default=os.path.join("results", "results", "results.csv"),
@@ -1641,6 +1788,7 @@ def run_experiment(
     search_mode,
     radii_workers,
     *,
+    cplex_threads=1,
     mgr,
     cancel_dict
 ):
@@ -1658,6 +1806,8 @@ def run_experiment(
     for encoding in encodings:
         for solver_name in solvers:
             for run_id in range(5):
+                if solver_name == "cplex":
+                    os.environ["PCENTER_CPLEX_THREADS"] = str(max(1, int(cplex_threads)))
                 print(
                     f"[RUN] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"encoding={encoding} solver={solver_name} search={search_mode}",
@@ -1726,7 +1876,7 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 4}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 4, "cplex": 5}
     mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "incremental2": 4}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
@@ -2031,6 +2181,7 @@ if __name__ == "__main__":
                 args.time_limit,
                 args.search_mode,
                 args.radii_workers,
+                cplex_threads=args.cplex_threads,
                 mgr=MGR,
                 cancel_dict=CANCEL,
             )

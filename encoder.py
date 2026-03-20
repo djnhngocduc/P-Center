@@ -162,6 +162,34 @@ class PCenterSAT:
         }
         return cnf, info
 
+    def _build_setcover_data(self, radius: float):
+        """
+        Build the direct set-covering feasibility data for one radius.
+        This is used by the CPLEX backend and deliberately avoids CNF.
+
+        Returns None if some demand cannot be covered at this radius.
+        """
+        active_demands = list(range(self.n))
+        candidates = list(range(self.n))
+
+        cover_rows = []
+        for u in active_demands:
+            allowed = []
+            for c in candidates:
+                if self.dist[c][u] <= radius + 1e-12:
+                    allowed.append(c)
+            if not allowed:
+                return None
+            cover_rows.append((u, allowed))
+
+        return {
+            "n": self.n,
+            "p": self.p,
+            "candidates": candidates,
+            "active_demands": active_demands,
+            "cover_rows": cover_rows,
+        }
+
     def _encode_atmost_nsc(self, cnf, lits, bound):
         n = len(lits)
         k = bound
