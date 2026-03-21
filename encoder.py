@@ -1,6 +1,7 @@
 import math
 from typing import List, Tuple
 from threading import RLock
+from bisect import bisect_right
 from pysat.formula import CNF
 from pysat.card import CardEnc
 from pysat.card import EncType as CardEncType
@@ -415,19 +416,17 @@ class PCenterSAT:
     
     def _build_incremental2_base_cnf(self, encoding: str, ub_idx: int = 0):
         """
-        Build the permanent part of incremental3 SAT (edge-prefix tightening):
-
+        Optimized incremental2 base CNF:
         - one global AtMost-p over all y
         - edge variables e_{u,c} for every covering edge at the base radius
         - permanent base coverage clauses over edge vars
         - linking clauses  (¬e_{u,c} ∨ y_c)
-        - level variables p_k for tighter radii
-        - chain clauses    (¬p_k ∨ p_{k-1})
+        - level variables only for active drop indices
+        - chain clauses over active drop indices only
         - edge drop clauses (¬p_drop ∨ ¬e_{u,c})
 
-        Radii are stored in descending order. The base radius is radii[ub_idx],
-        and each edge (u,c) is disabled from the first tighter radius where
-        dist[c][u] exceeds that radius.
+        Radii are stored in descending order.
+        Base radius = radii[ub_idx].
         """
         cnf, info = self._build_incremental_base_cnf(encoding=encoding)
 
@@ -438,8 +437,8 @@ class PCenterSAT:
             info.update({
                 "base_radius": None,
                 "ub_idx": 0,
-                "edge_vars": {},
                 "level_vars": {},
+                "active_drop_idxs": [],
                 "edge_count": 0,
             })
             return cnf, info
@@ -447,60 +446,80 @@ class PCenterSAT:
         ub_idx = max(0, min(int(ub_idx), nR - 1))
         radius_ub = radii[ub_idx]
 
-        # level variable p_k for each tighter radius k > ub_idx
-        level_vars = {}
-        for k in range(ub_idx + 1, nR):
-            v = self._new_aux_var(cnf)
-            level_vars[k] = v
+        self._prepare_incremental_cover_order()
 
-        # chain: p_k -> p_{k-1}
-        for k in range(ub_idx + 2, nR):
-            cnf.append([-level_vars[k], level_vars[k - 1]])
+        # For bisect on descending radii:
+        # neg_radii is ascending because radii is descending.
+        # drop_idx = first k such that radii[k] < d - EPS
+        eps = 1e-12
+        neg_radii = [-r for r in radii]
 
-        edge_vars = {}
         edge_count = 0
 
+        # Temporarily collect which evars drop at which radius index
+        drop_buckets = {}   # drop_idx -> [evar, evar, ...]
+        cover_rows = []     # per-demand coverage clause (list of evars)
+
         for u in range(self.n):
-            cover_edge_lits = []
+            row_evars = []
 
-            for c in range(self.n):
-                d = self.dist[c][u]
-                if d <= radius_ub + 1e-12:
-                    evar = self._new_aux_var(cnf)
-                    edge_vars[(u, c)] = evar
-                    edge_count += 1
+            # cover_order[u] is already sorted by distance increasing
+            for d, c in self._incremental_cover_order[u]:
+                if d > radius_ub + eps:
+                    break
 
-                    cover_edge_lits.append(evar)
+                evar = self._new_aux_var(cnf)
+                edge_count += 1
+                row_evars.append(evar)
 
-                    # e_(u,c) -> y_c
-                    cnf.append([-evar, self.y_lit_all[c]])
+                # e_(u,c) -> y_c
+                cnf.append([-evar, self.y_lit_all[c]])
 
-                    # find first tighter level where edge (u,c) becomes invalid
-                    last_valid_idx = ub_idx
-                    for k in range(ub_idx + 1, nR):
-                        if d <= radii[k] + 1e-12:
-                            last_valid_idx = k
-                        else:
-                            break
+                # first index where edge becomes invalid:
+                # valid while d <= radii[k] + eps
+                # invalid when radii[k] < d - eps
+                drop_idx = bisect_right(neg_radii, -(d - eps))
 
-                    drop_idx = last_valid_idx + 1
-                    if drop_idx < nR:
-                        pk = level_vars[drop_idx]
-                        # p_drop -> ¬e_(u,c)
-                        cnf.append([-pk, -evar])
+                # Only levels tighter than ub_idx matter
+                if drop_idx <= ub_idx:
+                    drop_idx = ub_idx + 1
 
-            # base coverage at radius_ub
-            if not cover_edge_lits:
+                if drop_idx < nR:
+                    drop_buckets.setdefault(drop_idx, []).append(evar)
+
+            if not row_evars:
                 cnf.append([])
             else:
-                cnf.append(cover_edge_lits)
+                cnf.append(row_evars)
+
+            cover_rows.append(row_evars)
+
+        # Create level vars only for indices that actually drop something
+        active_drop_idxs = sorted(drop_buckets.keys())
+        level_vars = {}
+
+        for k in active_drop_idxs:
+            level_vars[k] = self._new_aux_var(cnf)
+
+        # Chain only across active levels:
+        # tighter level -> previous active tighter level
+        for i in range(1, len(active_drop_idxs)):
+            cur_k = active_drop_idxs[i]
+            prev_k = active_drop_idxs[i - 1]
+            cnf.append([-level_vars[cur_k], level_vars[prev_k]])
+
+        # Add drop clauses bucket-wise
+        for k in active_drop_idxs:
+            pk = level_vars[k]
+            for evar in drop_buckets[k]:
+                cnf.append([-pk, -evar])
 
         info = dict(info)
         info.update({
             "base_radius": radius_ub,
             "ub_idx": ub_idx,
-            "edge_vars": edge_vars,
             "level_vars": level_vars,
+            "active_drop_idxs": active_drop_idxs,
             "edge_count": edge_count,
         })
         return cnf, info

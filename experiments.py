@@ -7,6 +7,7 @@ import os
 import sys
 import subprocess
 import tempfile
+from bisect import bisect_right
 from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from encoder import PCenterSAT
@@ -438,6 +439,7 @@ def search_min_radius_incremental2(
 
     y_vars = info["y"]
     level_vars = info["level_vars"]
+    active_drop_idxs = info.get("active_drop_idxs", [])
     base_radius = info["base_radius"]
     edge_count = info["edge_count"]
 
@@ -452,7 +454,7 @@ def search_min_radius_incremental2(
         f"[INC2-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
         f"ub_idx={ub_idx} base_R={base_radius} lo={lo} hi={hi} nR={nR} "
         f"base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv} "
-        f"base_edges={edge_count}",
+        f"base_edges={edge_count} active_levels={len(active_drop_idxs)}",
         flush=True
     )
 
@@ -462,8 +464,10 @@ def search_min_radius_incremental2(
             R = radii[mid]
 
             assumptions = []
-            if mid > ub_idx:
-                assumptions = [level_vars[mid]]
+            if mid > ub_idx and active_drop_idxs:
+                pos = bisect_right(active_drop_idxs, mid) - 1
+                if pos >= 0:
+                    assumptions = [level_vars[active_drop_idxs[pos]]]
 
             print(
                 f"[INC2-STEP] lo={lo} hi={hi} mid={mid} R={R} "
