@@ -1,7 +1,6 @@
 import math
 from typing import List, Tuple
 from threading import RLock
-from bisect import bisect_right
 from pysat.formula import CNF
 from pysat.card import CardEnc
 from pysat.card import EncType as CardEncType
@@ -291,11 +290,6 @@ class PCenterSAT:
 
         cnf.nv = max(getattr(cnf, "nv", 0), int(max_var))
     
-    def _new_aux_var(self, cnf):
-        base = self.y_lit_all[-1] if self.n > 0 else 0
-        cnf.nv = max(getattr(cnf, "nv", 0), base) + 1
-        return cnf.nv
-    
     def _prepare_incremental_cover_order(self):
         """
         Precompute, for each demand u, the centers c sorted by distance dist[c][u].
@@ -413,116 +407,6 @@ class PCenterSAT:
             clauses.append(allowed)
 
         return clauses
-    
-    def _build_incremental2_base_cnf(self, encoding: str, ub_idx: int = 0):
-        """
-        Optimized incremental2 base CNF:
-        - one global AtMost-p over all y
-        - edge variables e_{u,c} for every covering edge at the base radius
-        - permanent base coverage clauses over edge vars
-        - linking clauses  (¬e_{u,c} ∨ y_c)
-        - level variables only for active drop indices
-        - chain clauses over active drop indices only
-        - edge drop clauses (¬p_drop ∨ ¬e_{u,c})
-
-        Radii are stored in descending order.
-        Base radius = radii[ub_idx].
-        """
-        cnf, info = self._build_incremental_base_cnf(encoding=encoding)
-
-        radii = list(self.radii)
-        nR = len(radii)
-        if nR == 0:
-            info = dict(info)
-            info.update({
-                "base_radius": None,
-                "ub_idx": 0,
-                "level_vars": {},
-                "active_drop_idxs": [],
-                "edge_count": 0,
-            })
-            return cnf, info
-
-        ub_idx = max(0, min(int(ub_idx), nR - 1))
-        radius_ub = radii[ub_idx]
-
-        self._prepare_incremental_cover_order()
-
-        # For bisect on descending radii:
-        # neg_radii is ascending because radii is descending.
-        # drop_idx = first k such that radii[k] < d - EPS
-        eps = 1e-12
-        neg_radii = [-r for r in radii]
-
-        edge_count = 0
-
-        # Temporarily collect which evars drop at which radius index
-        drop_buckets = {}   # drop_idx -> [evar, evar, ...]
-        cover_rows = []     # per-demand coverage clause (list of evars)
-
-        for u in range(self.n):
-            row_evars = []
-
-            # cover_order[u] is already sorted by distance increasing
-            for d, c in self._incremental_cover_order[u]:
-                if d > radius_ub + eps:
-                    break
-
-                evar = self._new_aux_var(cnf)
-                edge_count += 1
-                row_evars.append(evar)
-
-                # e_(u,c) -> y_c
-                cnf.append([-evar, self.y_lit_all[c]])
-
-                # first index where edge becomes invalid:
-                # valid while d <= radii[k] + eps
-                # invalid when radii[k] < d - eps
-                drop_idx = bisect_right(neg_radii, -(d - eps))
-
-                # Only levels tighter than ub_idx matter
-                if drop_idx <= ub_idx:
-                    drop_idx = ub_idx + 1
-
-                if drop_idx < nR:
-                    drop_buckets.setdefault(drop_idx, []).append(evar)
-
-            if not row_evars:
-                cnf.append([])
-            else:
-                cnf.append(row_evars)
-
-            cover_rows.append(row_evars)
-
-        # Create level vars only for indices that actually drop something
-        active_drop_idxs = sorted(drop_buckets.keys())
-        level_vars = {}
-
-        for k in active_drop_idxs:
-            level_vars[k] = self._new_aux_var(cnf)
-
-        # Chain only across active levels:
-        # tighter level -> previous active tighter level
-        for i in range(1, len(active_drop_idxs)):
-            cur_k = active_drop_idxs[i]
-            prev_k = active_drop_idxs[i - 1]
-            cnf.append([-level_vars[cur_k], level_vars[prev_k]])
-
-        # Add drop clauses bucket-wise
-        for k in active_drop_idxs:
-            pk = level_vars[k]
-            for evar in drop_buckets[k]:
-                cnf.append([-pk, -evar])
-
-        info = dict(info)
-        info.update({
-            "base_radius": radius_ub,
-            "ub_idx": ub_idx,
-            "level_vars": level_vars,
-            "active_drop_idxs": active_drop_idxs,
-            "edge_count": edge_count,
-        })
-        return cnf, info
         
 
 

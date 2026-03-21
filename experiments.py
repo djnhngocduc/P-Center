@@ -7,7 +7,6 @@ import os
 import sys
 import subprocess
 import tempfile
-from bisect import bisect_right
 from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from encoder import PCenterSAT
@@ -375,173 +374,6 @@ def search_min_radius_incremental(
 
     print(
         f"[INC-RESULT] status=OK best_idx={best_sat_idx} "
-        f"best_R={best_radius} cpu={best_sat_cpu}",
-        flush=True
-    )
-
-    search_elapsed = time.perf_counter() - search_t0
-    return (
-        "OK",
-        best_radius,
-        nvars,
-        nclauses,
-        best_centers,
-        best_sat_cpu,
-        search_elapsed,
-    )
-
-def search_min_radius_incremental2(
-    inst,
-    encoding,
-    solver_name,
-    time_limit,
-    *,
-    radii_workers,
-    seed_idx=None,
-    mgr=None,
-    cancel_dict=None
-):
-    """
-    Incremental2 SAT (edge-prefix tightening):
-      - build permanent global AtMost-p once
-      - build base coverage at the upper-bound radius using edge vars e_{u,c}
-      - link edge vars to centers by (¬e_{u,c} ∨ y_c)
-      - create level vars p_k for tighter radii
-      - use chain p_k -> p_{k-1}
-      - disable edges monotonically by (¬p_drop ∨ ¬e_{u,c})
-
-    Solving:
-      - if mid == ub_idx, solve with no assumptions
-      - if mid > ub_idx, solve with assumptions=[p_mid]
-
-    This supports only INTERNAL PySAT solvers.
-    """
-    search_t0 = time.perf_counter()
-
-    if solver_name in EXTERNAL_SOLVERS:
-        raise ValueError(
-            f"Incremental2 mode does not support external solver '{solver_name}'. "
-            f"Use an internal PySAT solver such as glucose4/maplecm/maplechrono."
-        )
-
-    radii = inst.radii
-    nR = len(radii)
-    if nR == 0:
-        search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
-
-    ub_idx = seed_idx if (seed_idx is not None and 0 <= seed_idx < nR) else 0
-
-    base_cnf, info = inst._build_incremental2_base_cnf(
-        encoding=encoding,
-        ub_idx=ub_idx,
-    )
-
-    y_vars = info["y"]
-    level_vars = info["level_vars"]
-    active_drop_idxs = info.get("active_drop_idxs", [])
-    base_radius = info["base_radius"]
-    edge_count = info["edge_count"]
-
-    lo = ub_idx
-    hi = nR - 1
-
-    best_sat_idx = None
-    best_centers = None
-    best_sat_cpu = None
-
-    print(
-        f"[INC2-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
-        f"ub_idx={ub_idx} base_R={base_radius} lo={lo} hi={hi} nR={nR} "
-        f"base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv} "
-        f"base_edges={edge_count} active_levels={len(active_drop_idxs)}",
-        flush=True
-    )
-
-    with Solver(name=solver_name, bootstrap_with=base_cnf.clauses) as solver:
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            R = radii[mid]
-
-            assumptions = []
-            if mid > ub_idx and active_drop_idxs:
-                pos = bisect_right(active_drop_idxs, mid) - 1
-                if pos >= 0:
-                    assumptions = [level_vars[active_drop_idxs[pos]]]
-
-            print(
-                f"[INC2-STEP] lo={lo} hi={hi} mid={mid} R={R} "
-                f"assumptions={assumptions}",
-                flush=True
-            )
-
-            timer = None
-            cpu0 = None
-            cpu1 = None
-            try:
-                if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
-                    timer = threading.Timer(time_limit, solver.interrupt)
-                    timer.start()
-                    cpu0 = _cpu_self_seconds()
-                    sat = solver.solve_limited(
-                        assumptions=assumptions,
-                        expect_interrupt=True
-                    )
-                    cpu1 = _cpu_self_seconds()
-                else:
-                    cpu0 = _cpu_self_seconds()
-                    sat = solver.solve(assumptions=assumptions)
-                    cpu1 = _cpu_self_seconds()
-            finally:
-                if timer:
-                    timer.cancel()
-
-            cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
-
-            if sat is None:
-                print(
-                    f"[INC2-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
-                    flush=True
-                )
-                search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, base_cnf.nv, len(base_cnf.clauses), None, cpu_sec, search_elapsed
-
-            if sat:
-                model = solver.get_model() or []
-                model_set = set(model)
-                centers = sorted([j for j, v in enumerate(y_vars) if v in model_set])
-
-                best_sat_idx = mid
-                best_centers = centers
-                best_sat_cpu = cpu_sec
-
-                print(
-                    f"[INC2-DONE] idx={mid} R={R} status=sat cpu={cpu_sec:.6f}s centers={centers}",
-                    flush=True
-                )
-
-                # radii descending: SAT => try smaller radius => move right
-                lo = mid + 1
-            else:
-                print(
-                    f"[INC2-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
-                    flush=True
-                )
-
-                # radii descending: UNSAT => need larger radius => move left
-                hi = mid - 1
-
-    if best_sat_idx is None:
-        print("[INC2-RESULT] infeasible (no SAT found)", flush=True)
-        search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
-
-    best_radius = radii[best_sat_idx]
-    nvars = base_cnf.nv
-    nclauses = len(base_cnf.clauses)
-
-    print(
-        f"[INC2-RESULT] status=OK best_idx={best_sat_idx} "
         f"best_R={best_radius} cpu={best_sat_cpu}",
         flush=True
     )
@@ -1768,8 +1600,8 @@ def parse_args():
         "--search-mode",
         type=str,
         default="parallel",
-        choices=["parallel", "binary", "kary", "incremental", "incremental2"],
-        help="Search strategy: parallel, binary, or kary, or incremental, or incremental2",
+        choices=["parallel", "binary", "kary", "incremental"],
+        help="Search strategy: parallel, binary, or kary, or incremental",
     )
     ap.add_argument(
         "--radii-workers",
@@ -1836,8 +1668,6 @@ def run_experiment(
                     search_fn = search_min_radius_kary
                 elif search_mode == "incremental":
                     search_fn = search_min_radius_incremental
-                elif search_mode == "incremental2":
-                    search_fn = search_min_radius_incremental2
                 else:
                     raise ValueError(f"Unknown search_mode: {search_mode}")
 
@@ -1892,7 +1722,7 @@ def run_experiment(
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 4, "cplex": 5}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "incremental2": 4}
+    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
