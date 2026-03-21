@@ -401,15 +401,19 @@ def search_min_radius_incremental2(
     cancel_dict=None
 ):
     """
-    Incremental2 SAT:
+    Incremental2 SAT (edge-prefix tightening):
       - build permanent global AtMost-p once
-      - also preload permanent coverage for the largest radius radii[0]
-      - for each tested radius R, add guarded tightened coverage clauses
-            (-alpha_R OR coverage_clause_for_R)
-      - solve with assumptions=[alpha_R]
+      - build base coverage at the upper-bound radius using edge vars e_{u,c}
+      - link edge vars to centers by (¬e_{u,c} ∨ y_c)
+      - create level vars p_k for tighter radii
+      - use chain p_k -> p_{k-1}
+      - disable edges monotonically by (¬p_drop ∨ ¬e_{u,c})
 
-    This keeps the existing incremental mode intact and adds the variant
-    where upper-bound coverage is already present in the base solver.
+    Solving:
+      - if mid == ub_idx, solve with no assumptions
+      - if mid > ub_idx, solve with assumptions=[p_mid]
+
+    This supports only INTERNAL PySAT solvers.
     """
     search_t0 = time.perf_counter()
 
@@ -419,31 +423,36 @@ def search_min_radius_incremental2(
             f"Use an internal PySAT solver such as glucose4/maplecm/maplechrono."
         )
 
-    base_cnf, info = inst._build_incremental2_base_cnf(encoding=encoding)
-    radii = info["radii"]
-    y_vars = info["y"]
-    base_radius = info.get("base_radius", None)
-
+    radii = inst.radii
     nR = len(radii)
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
+        return "infeasible", None, None, None, None, None, search_elapsed
 
-    lo = 0
+    ub_idx = seed_idx if (seed_idx is not None and 0 <= seed_idx < nR) else 0
+
+    base_cnf, info = inst._build_incremental2_base_cnf(
+        encoding=encoding,
+        ub_idx=ub_idx,
+    )
+
+    y_vars = info["y"]
+    level_vars = info["level_vars"]
+    base_radius = info["base_radius"]
+    edge_count = info["edge_count"]
+
+    lo = ub_idx
     hi = nR - 1
 
     best_sat_idx = None
     best_centers = None
     best_sat_cpu = None
 
-    next_var = base_cnf.nv + 1
-    tested = {}
-    added_clause_count = 0
-
     print(
         f"[INC2-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
-        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR} "
-        f"base_radius={base_radius} base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv}",
+        f"ub_idx={ub_idx} base_R={base_radius} lo={lo} hi={hi} nR={nR} "
+        f"base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv} "
+        f"base_edges={edge_count}",
         flush=True
     )
 
@@ -452,27 +461,15 @@ def search_min_radius_incremental2(
             mid = (lo + hi) // 2
             R = radii[mid]
 
-            if mid not in tested:
-                alpha = next_var
-                next_var += 1
-                tested[mid] = alpha
+            assumptions = []
+            if mid > ub_idx:
+                assumptions = [level_vars[mid]]
 
-                step_clauses = inst._build_incremental_guarded_clauses(
-                    radius=R,
-                    selector_lit=alpha,
-                )
-                for cl in step_clauses:
-                    solver.add_clause(cl)
-                added_clause_count += len(step_clauses)
-
-                print(
-                    f"[INC2-ADD] idx={mid} R={R} selector={alpha} added_clauses={len(step_clauses)}",
-                    flush=True
-                )
-            else:
-                alpha = tested[mid]
-
-            print(f"[INC2-STEP] lo={lo} hi={hi} mid={mid} R={R}", flush=True)
+            print(
+                f"[INC2-STEP] lo={lo} hi={hi} mid={mid} R={R} "
+                f"assumptions={assumptions}",
+                flush=True
+            )
 
             timer = None
             cpu0 = None
@@ -482,11 +479,14 @@ def search_min_radius_incremental2(
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
                     cpu0 = _cpu_self_seconds()
-                    sat = solver.solve_limited(assumptions=[alpha], expect_interrupt=True)
+                    sat = solver.solve_limited(
+                        assumptions=assumptions,
+                        expect_interrupt=True
+                    )
                     cpu1 = _cpu_self_seconds()
                 else:
                     cpu0 = _cpu_self_seconds()
-                    sat = solver.solve(assumptions=[alpha])
+                    sat = solver.solve(assumptions=assumptions)
                     cpu1 = _cpu_self_seconds()
             finally:
                 if timer:
@@ -495,9 +495,12 @@ def search_min_radius_incremental2(
             cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
 
             if sat is None:
-                print(f"[INC2-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s", flush=True)
+                print(
+                    f"[INC2-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
+                    flush=True
+                )
                 search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, next_var - 1, len(base_cnf.clauses) + added_clause_count, None, cpu_sec, search_elapsed
+                return "timeout", None, base_cnf.nv, len(base_cnf.clauses), None, cpu_sec, search_elapsed
 
             if sat:
                 model = solver.get_model() or []
@@ -512,22 +515,30 @@ def search_min_radius_incremental2(
                     f"[INC2-DONE] idx={mid} R={R} status=sat cpu={cpu_sec:.6f}s centers={centers}",
                     flush=True
                 )
+
+                # radii descending: SAT => try smaller radius => move right
                 lo = mid + 1
             else:
-                print(f"[INC2-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s", flush=True)
+                print(
+                    f"[INC2-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
+                    flush=True
+                )
+
+                # radii descending: UNSAT => need larger radius => move left
                 hi = mid - 1
 
     if best_sat_idx is None:
         print("[INC2-RESULT] infeasible (no SAT found)", flush=True)
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, next_var - 1, len(base_cnf.clauses) + added_clause_count, None, None, search_elapsed
+        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
 
     best_radius = radii[best_sat_idx]
-    nvars = next_var - 1
-    nclauses = len(base_cnf.clauses) + added_clause_count
+    nvars = base_cnf.nv
+    nclauses = len(base_cnf.clauses)
 
     print(
-        f"[INC2-RESULT] status=OK best_idx={best_sat_idx} best_R={best_radius} cpu={best_sat_cpu}",
+        f"[INC2-RESULT] status=OK best_idx={best_sat_idx} "
+        f"best_R={best_radius} cpu={best_sat_cpu}",
         flush=True
     )
 

@@ -413,34 +413,96 @@ class PCenterSAT:
 
         return clauses
     
-    def _build_incremental2_base_cnf(self, encoding: str):
+    def _build_incremental2_base_cnf(self, encoding: str, ub_idx: int = 0):
         """
-        Build the permanent part of incremental2 SAT:
-          - one global AtMost-p over all y
-          - unguarded coverage clauses for the largest radius radii[0]
+        Build the permanent part of incremental3 SAT (edge-prefix tightening):
 
-        Later, smaller radii are enforced lazily by guarded coverage clauses
-        under assumptions, so this mode keeps the user's idea of having the
-        upper-bound coverage already loaded in the solver.
+        - one global AtMost-p over all y
+        - edge variables e_{u,c} for every covering edge at the base radius
+        - permanent base coverage clauses over edge vars
+        - linking clauses  (¬e_{u,c} ∨ y_c)
+        - level variables p_k for tighter radii
+        - chain clauses    (¬p_k ∨ p_{k-1})
+        - edge drop clauses (¬p_drop ∨ ¬e_{u,c})
+
+        Radii are stored in descending order. The base radius is radii[ub_idx],
+        and each edge (u,c) is disabled from the first tighter radius where
+        dist[c][u] exceeds that radius.
         """
         cnf, info = self._build_incremental_base_cnf(encoding=encoding)
 
-        if not self.radii:
+        radii = list(self.radii)
+        nR = len(radii)
+        if nR == 0:
+            info = dict(info)
+            info.update({
+                "base_radius": None,
+                "ub_idx": 0,
+                "edge_vars": {},
+                "level_vars": {},
+                "edge_count": 0,
+            })
             return cnf, info
 
-        radius_ub = self.radii[0]
+        ub_idx = max(0, min(int(ub_idx), nR - 1))
+        radius_ub = radii[ub_idx]
+
+        # level variable p_k for each tighter radius k > ub_idx
+        level_vars = {}
+        for k in range(ub_idx + 1, nR):
+            v = self._new_aux_var(cnf)
+            level_vars[k] = v
+
+        # chain: p_k -> p_{k-1}
+        for k in range(ub_idx + 2, nR):
+            cnf.append([-level_vars[k], level_vars[k - 1]])
+
+        edge_vars = {}
+        edge_count = 0
+
         for u in range(self.n):
-            allowed = []
+            cover_edge_lits = []
+
             for c in range(self.n):
-                if self.dist[c][u] <= radius_ub + 1e-12:
-                    allowed.append(self.y_lit_all[c])
-            if not allowed:
+                d = self.dist[c][u]
+                if d <= radius_ub + 1e-12:
+                    evar = self._new_aux_var(cnf)
+                    edge_vars[(u, c)] = evar
+                    edge_count += 1
+
+                    cover_edge_lits.append(evar)
+
+                    # e_(u,c) -> y_c
+                    cnf.append([-evar, self.y_lit_all[c]])
+
+                    # find first tighter level where edge (u,c) becomes invalid
+                    last_valid_idx = ub_idx
+                    for k in range(ub_idx + 1, nR):
+                        if d <= radii[k] + 1e-12:
+                            last_valid_idx = k
+                        else:
+                            break
+
+                    drop_idx = last_valid_idx + 1
+                    if drop_idx < nR:
+                        pk = level_vars[drop_idx]
+                        # p_drop -> ¬e_(u,c)
+                        cnf.append([-pk, -evar])
+
+            # base coverage at radius_ub
+            if not cover_edge_lits:
                 cnf.append([])
             else:
-                cnf.append(allowed)
+                cnf.append(cover_edge_lits)
 
         info = dict(info)
-        info["base_radius"] = radius_ub
+        info.update({
+            "base_radius": radius_ub,
+            "ub_idx": ub_idx,
+            "edge_vars": edge_vars,
+            "level_vars": level_vars,
+            "edge_count": edge_count,
+        })
         return cnf, info
         
 
