@@ -1820,7 +1820,7 @@ def run_experiment(
     for solver_name in solvers:
         solver_encodings = encodings if solver_name != "cplex" else ["setcover"]
         for encoding in solver_encodings:
-            for run_id in range(5):
+            for run_id in range(1):
                 if solver_name == "cplex":
                     os.environ["PCENTER_CPLEX_THREADS"] = str(max(1, int(cplex_threads)))
                 print(
