@@ -2066,6 +2066,7 @@ def profile_threshold_incremental_vs_cplex(
             summary_out,
             summary_export_rows,
             fieldnames=[
+                "instance",
                 "row_type",
                 "remaining_iters",
                 "count",
