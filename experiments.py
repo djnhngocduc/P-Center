@@ -1587,7 +1587,7 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex"],
+        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "glucose42", "cadical195", "lingeling", "maplesat", "minisat22", "kissat", "cplex"],
         help="Solvers to use",
     )
     ap.add_argument(
@@ -1721,7 +1721,7 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 4, "cplex": 5}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "glucose42": 4, "cadical195": 5, "lingeling": 6, "maplesat": 7, "minisat22": 8, "kissat": 9, "cplex": 10}
     mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
