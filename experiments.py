@@ -392,6 +392,225 @@ def search_min_radius_incremental(
         search_elapsed,
     )
 
+def search_min_radius_hybrid_threshold(
+    inst,
+    encoding,
+    solver_name,
+    time_limit,
+    *,
+    hybrid_threshold,
+    cplex_threads=1,
+    radii_workers,
+    seed_idx=None,
+    mgr=None,
+    cancel_dict=None
+):
+    """
+    Hybrid threshold search:
+      - if remaining_iters > hybrid_threshold: use incremental SAT
+      - else: use CPLEX
+    Binary search is still the outer search logic.
+
+    Important:
+      - solver_name here must be an INTERNAL PySAT solver (not external)
+      - encoding is used for the SAT side
+    """
+    search_t0 = time.perf_counter()
+
+    if solver_name in EXTERNAL_SOLVERS:
+        raise ValueError(
+            f"hybrid_threshold does not support external SAT solver '{solver_name}'. "
+            f"Use an internal PySAT solver such as glucose4, glucose42, cadical195, maplesat, ..."
+        )
+
+    if cplex is None:
+        raise ImportError(
+            "hybrid_threshold needs CPLEX installed because late binary iterations use CPLEX."
+        )
+
+    base_cnf, info = inst._build_incremental_base_cnf(encoding=encoding)
+    radii = info["radii"]
+    y_vars = info["y"]
+
+    nR = len(radii)
+    if nR == 0:
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
+
+    lo = 0
+    hi = nR - 1
+
+    best_sat_idx = None
+    best_centers = None
+    best_cpu = None
+
+    next_var = base_cnf.nv + 1
+    tested = {}   # mid -> selector lit (for SAT-tested radii only)
+
+    print(
+        f"[HYBRID-INIT] encoding={encoding} sat_solver={solver_name} "
+        f"threshold={hybrid_threshold} p={inst.p} "
+        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR} "
+        f"base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv}",
+        flush=True
+    )
+
+    with Solver(name=solver_name, bootstrap_with=base_cnf.clauses) as solver:
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            R = radii[mid]
+            remaining_iters = _remaining_iters_from_bounds(lo, hi)
+
+            use_sat = remaining_iters > hybrid_threshold
+
+            print(
+                f"[HYBRID-STEP] lo={lo} hi={hi} mid={mid} R={R} "
+                f"remaining_iters={remaining_iters} backend={'SAT' if use_sat else 'CPLEX'}",
+                flush=True
+            )
+
+            if use_sat:
+                if mid not in tested:
+                    alpha = next_var
+                    next_var += 1
+                    tested[mid] = alpha
+
+                    step_clauses = inst._build_incremental_guarded_clauses(
+                        radius=R,
+                        selector_lit=alpha,
+                    )
+                    for cl in step_clauses:
+                        solver.add_clause(cl)
+
+                    print(
+                        f"[HYBRID-SAT-ADD] idx={mid} R={R} selector={alpha} "
+                        f"added_clauses={len(step_clauses)}",
+                        flush=True
+                    )
+                else:
+                    alpha = tested[mid]
+
+                timer = None
+                cpu0 = None
+                cpu1 = None
+                try:
+                    if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
+                        timer = threading.Timer(time_limit, solver.interrupt)
+                        timer.start()
+                        cpu0 = _cpu_self_seconds()
+                        try:
+                            sat = solver.solve_limited(
+                                assumptions=[alpha],
+                                expect_interrupt=True
+                            )
+                        except NotImplementedError:
+                            sat = solver.solve(assumptions=[alpha])
+                        cpu1 = _cpu_self_seconds()
+                    else:
+                        cpu0 = _cpu_self_seconds()
+                        sat = solver.solve(assumptions=[alpha])
+                        cpu1 = _cpu_self_seconds()
+                finally:
+                    if timer:
+                        timer.cancel()
+
+                cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
+
+                if sat is None:
+                    print(
+                        f"[HYBRID-SAT-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
+                        flush=True
+                    )
+                    search_elapsed = time.perf_counter() - search_t0
+                    return "timeout", None, next_var - 1, None, None, cpu_sec, search_elapsed
+
+                if sat:
+                    model = solver.get_model() or []
+                    model_set = set(model)
+                    centers = sorted([j for j, v in enumerate(y_vars) if v in model_set])
+
+                    best_sat_idx = mid
+                    best_centers = centers
+                    best_cpu = cpu_sec
+
+                    print(
+                        f"[HYBRID-SAT-DONE] idx={mid} R={R} status=sat cpu={cpu_sec:.6f}s centers={centers}",
+                        flush=True
+                    )
+
+                    lo = mid + 1
+                else:
+                    print(
+                        f"[HYBRID-SAT-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
+                        flush=True
+                    )
+                    hi = mid - 1
+
+            else:
+                idx, Rret, status, cpu_sec, nvars_cpx, nclauses_cpx, centers = _solve_radius_cplex(
+                    inst=inst,
+                    idx=mid,
+                    radius=R,
+                    time_limit=time_limit,
+                    threads=cplex_threads,
+                    data=None,
+                )
+
+                print(
+                    f"[HYBRID-CPLEX-DONE] idx={idx} R={Rret} status={status} "
+                    f"cpu={cpu_sec:.6f}s nvars={nvars_cpx} nclauses={nclauses_cpx}",
+                    flush=True
+                )
+
+                if status == "sat":
+                    best_sat_idx = idx
+                    best_centers = centers
+                    best_cpu = cpu_sec
+                    lo = idx + 1
+
+                elif status == "unsat":
+                    hi = idx - 1
+
+                elif status in ("timeout", "error"):
+                    if best_sat_idx is not None:
+                        print(
+                            f"[HYBRID-FALLBACK] stop on {status}; "
+                            f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                            flush=True
+                        )
+                        break
+
+                    search_elapsed = time.perf_counter() - search_t0
+                    return status, None, nvars_cpx, nclauses_cpx, None, cpu_sec, search_elapsed
+
+    if best_sat_idx is None:
+        print("[HYBRID-RESULT] infeasible (no SAT found)", flush=True)
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, None, None, None, None, search_elapsed
+
+    best_radius = radii[best_sat_idx]
+
+    # report SAT-side structural size if SAT side was used enough; otherwise just keep None-safe estimates
+    nvars = next_var - 1
+    nclauses = len(base_cnf.clauses) + (len(tested) * inst.n)
+
+    print(
+        f"[HYBRID-RESULT] status=OK best_idx={best_sat_idx} "
+        f"best_R={best_radius} cpu={best_cpu} threshold={hybrid_threshold}",
+        flush=True
+    )
+
+    search_elapsed = time.perf_counter() - search_t0
+    return (
+        "OK",
+        best_radius,
+        nvars,
+        nclauses,
+        best_centers,
+        best_cpu,
+        search_elapsed,
+    )
+
 def search_min_radius_parallel(
     inst,
     encoding,
@@ -1606,8 +1825,8 @@ def parse_args():
         "--search-mode",
         type=str,
         default="parallel",
-        choices=["parallel", "binary", "kary", "incremental", "threshold_profile"],
-        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile",
+        choices=["parallel", "binary", "kary", "incremental", "threshold_profile", "hybrid_threshold"],
+        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile, or hybrid_threshold",
     )
     ap.add_argument(
         "--radii-workers",
@@ -1638,6 +1857,12 @@ def parse_args():
         type=str,
         default=os.path.join("results", "results", "threshold_summary.csv"),
         help="CSV output for threshold summary and best threshold candidates.",
+    )
+    ap.add_argument(
+        "--hybrid-threshold",
+        type=int,
+        default=11,
+        help="Use SAT if remaining_iters > threshold, else use CPLEX (default: 11).",
     )
     return ap.parse_args()
 
@@ -2119,13 +2344,15 @@ def run_experiment(
     radii_workers,
     *,
     cplex_threads=1,
+    hybrid_threshold=11,
     mgr,
     cancel_dict,
     threshold_detail_out=None,
     threshold_summary_out=None,
 ):
-    if "cplex" in solvers and search_mode not in ("binary", "threshold_profile"):
-        raise ValueError("CPLEX backend currently supports only binary search or threshold_profile.")
+    if "cplex" in solvers and search_mode not in ("binary", "threshold_profile", "hybrid_threshold"):
+        raise ValueError("CPLEX backend currently supports only binary search, threshold_profile, or hybrid_threshold.")
+    
     results = []
     load_t0 = time.perf_counter()
     inst, seed_idx = load_instance(inst_desc, use_seed_radius=False)
@@ -2217,20 +2444,30 @@ def run_experiment(
                     search_fn = search_min_radius_kary
                 elif search_mode == "incremental":
                     search_fn = search_min_radius_incremental
+                elif search_mode == "hybrid_threshold":
+                    search_fn = search_min_radius_hybrid_threshold
                 else:
                     raise ValueError(f"Unknown search_mode: {search_mode}")
 
                 cancel_dict.clear()
                 
+                extra_kwargs = dict(
+                    radii_workers=radii_workers,
+                    seed_idx=seed_idx,
+                    mgr=mgr,
+                    cancel_dict=cancel_dict,
+                )
+
+                if search_mode == "hybrid_threshold":
+                    extra_kwargs["hybrid_threshold"] = hybrid_threshold
+                    extra_kwargs["cplex_threads"] = cplex_threads
+
                 status, best_radius, nvars, nclauses, centers, best_sat_cpu, search_elapsed = search_fn(
                     inst,
                     encoding,
                     solver_name,
                     time_limit,
-                    radii_workers=radii_workers,
-                    seed_idx=seed_idx,
-                    mgr=mgr,
-                    cancel_dict=cancel_dict,
+                    **extra_kwargs,
                 )
 
                 total_time = load_time + search_elapsed
@@ -2271,7 +2508,7 @@ def run_experiment(
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "glucose42": 4, "cadical195": 5, "lingeling": 6, "maplesat": 7, "minisat22": 8, "kissat": 9, "cplex": 10}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3}
+    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "hybrid_threshold": 4}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
@@ -2582,6 +2819,7 @@ if __name__ == "__main__":
                 args.search_mode,
                 args.radii_workers,
                 cplex_threads=args.cplex_threads,
+                hybrid_threshold=args.hybrid_threshold,
                 mgr=MGR,
                 cancel_dict=CANCEL,
                 threshold_detail_out=args.threshold_detail_out,
