@@ -315,10 +315,13 @@ def search_min_radius_incremental(
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
                     cpu0 = _cpu_self_seconds()
-                    sat = solver.solve_limited(
-                        assumptions=[alpha],
-                        expect_interrupt=True
-                    )
+                    try:
+                        sat = solver.solve_limited(
+                            assumptions=[alpha],
+                            expect_interrupt=True
+                        )
+                    except NotImplementedError:
+                        sat = solver.solve(assumptions=[alpha])
                     cpu1 = _cpu_self_seconds()
                 else:
                     cpu0 = _cpu_self_seconds()
@@ -1506,7 +1509,10 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
                     cpu0 = _cpu_self_seconds()
-                    sat = solver.solve_limited(expect_interrupt=True)
+                    try:
+                        sat = solver.solve_limited(expect_interrupt=True)
+                    except NotImplementedError:
+                        sat = solver.solve()
                     cpu1 = _cpu_self_seconds()
 
                 else:
