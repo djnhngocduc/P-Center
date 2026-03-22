@@ -1664,11 +1664,21 @@ def _solver_wall_cost(status: str, wall_time: float, time_limit: float) -> float
     return float(wall_time)
 
 
-def _write_csv_rows(path: str, rows: list, fieldnames: list):
+def _write_csv_rows(path: str, rows: list, fieldnames: list, append: bool = False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
+
+    mode = "a" if append else "w"
+    file_exists = os.path.exists(path)
+
+    with open(path, mode, newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
+
+        # chỉ ghi header khi:
+        # - file mới, hoặc
+        # - không append
+        if (not append) or (not file_exists) or os.path.getsize(path) == 0:
+            w.writeheader()
+
         for r in rows:
             w.writerow(r)
 
@@ -1678,6 +1688,7 @@ def profile_threshold_incremental_vs_cplex(
     sat_solver_name,
     time_limit,
     *,
+    instance_name,
     cplex_threads=1,
     detail_out=None,
     summary_out=None,
@@ -1870,7 +1881,7 @@ def profile_threshold_incremental_vs_cplex(
                 winner = "cplex"
 
             row = {
-                "instance": getattr(inst, "name", None),
+                "instance": instance_name,
                 "step_no": step_no,
                 "lo_before": lo,
                 "hi_before": hi,
@@ -1955,6 +1966,7 @@ def profile_threshold_incremental_vs_cplex(
         cplex_cpu_vals = [float(r["cplex_cpu"]) for r in rows_k]
 
         summary_rows.append({
+            "instance": instance_name,
             "remaining_iters": k,
             "count": len(rows_k),
             "sat_wins": sat_wins,
@@ -1998,6 +2010,7 @@ def profile_threshold_incremental_vs_cplex(
                 cplex_steps += 1
 
         threshold_rows.append({
+            "instance": instance_name,
             "threshold": T,
             "policy": "use SAT if remaining_iters > T else CPLEX",
             "total_hybrid_wall": total_cost,
@@ -2045,6 +2058,7 @@ def profile_threshold_incremental_vs_cplex(
                 "winner",
                 "status_mismatch",
             ],
+            append=True,
         )
 
     if summary_out:
@@ -2073,6 +2087,7 @@ def profile_threshold_incremental_vs_cplex(
                 "sat_steps",
                 "cplex_steps",
             ],
+            append=True,
         )
 
     best_radius = radii[best_sat_idx] if best_sat_idx is not None else None
@@ -2148,6 +2163,7 @@ def run_experiment(
             encoding,
             sat_solver,
             time_limit,
+            instance_name=inst_desc["name"],
             cplex_threads=cplex_threads,
             detail_out=threshold_detail_out,
             summary_out=threshold_summary_out,
@@ -2538,6 +2554,12 @@ if __name__ == "__main__":
     CANCEL = MGR.dict()
 
     args = parse_args()
+
+    if args.search_mode == "threshold_profile":
+        for p in [args.threshold_detail_out, args.threshold_summary_out]:
+            if p and os.path.exists(p):
+                os.remove(p)
+
     instance_data = load_instance_data(args.instances)
 
     base_dir = os.path.dirname(os.path.abspath(args.instances))
