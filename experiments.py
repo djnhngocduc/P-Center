@@ -400,7 +400,6 @@ def search_min_radius_hybrid_threshold(
     time_limit,
     *,
     hybrid_threshold,
-    cplex_threads=1,
     radii_workers,
     seed_idx=None,
     mgr=None,
@@ -553,7 +552,6 @@ def search_min_radius_hybrid_threshold(
                         idx=mid,
                         radius=R,
                         time_limit=time_limit,
-                        threads=cplex_threads,
                         data=None,
                     )
 
@@ -709,7 +707,6 @@ def search_min_radius_hybrid_threshold(
                         idx=mid,
                         radius=R,
                         time_limit=time_limit,
-                        threads=cplex_threads,
                         data=None,
                     )
 
@@ -771,7 +768,6 @@ def search_min_radius_hybrid_race(
     solver_name,
     time_limit,
     *,
-    cplex_threads=1,
     radii_workers,
     seed_idx=None,
     mgr=None,
@@ -876,7 +872,7 @@ def search_min_radius_hybrid_race(
                 cplex_q = mp.Queue()
                 cplex_proc = mp.Process(
                     target=_solve_radius_cplex_proc,
-                    args=(inst, mid, R, time_limit, cplex_threads, cplex_q),
+                    args=(inst, mid, R, time_limit, cplex_q),
                     daemon=True,
                 )
                 cplex_proc.start()
@@ -1096,7 +1092,7 @@ def search_min_radius_hybrid_race(
             cplex_q = mp.Queue()
             cplex_proc = mp.Process(
                 target=_solve_radius_cplex_proc,
-                args=(inst, mid, R, time_limit, cplex_threads, cplex_q),
+                args=(inst, mid, R, time_limit, cplex_q),
                 daemon=True,
             )
             cplex_proc.start()
@@ -2155,7 +2151,7 @@ def _run_external_solver(solver_name, cnf, time_limit, cancel_ev=None):
 
     return status, cpu_time, (model_lits if status == "sat" else None)
 
-def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1, data=None):
+def _solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     pid = os.getpid()
 
     if cplex is None:
@@ -2187,8 +2183,6 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1, data=None):
 
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
-    if threads and threads > 0:
-        model.parameters.threads.set(int(threads))
 
     names = [f"x_{j}" for j in range(n)]
     model.variables.add(
@@ -2270,14 +2264,13 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1, data=None):
     )
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
-def _solve_radius_cplex_proc(inst, idx, radius, time_limit, threads, out_q):
+def _solve_radius_cplex_proc(inst, idx, radius, time_limit, out_q):
     try:
         res = _solve_radius_cplex(
             inst=inst,
             idx=idx,
             radius=radius,
             time_limit=time_limit,
-            threads=threads,
             data=None,
         )
         out_q.put(("ok", res))
@@ -2464,7 +2457,6 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 idx=idx,
                 radius=radius,
                 time_limit=time_limit,
-                threads=int(os.getenv("PCENTER_CPLEX_THREADS", "1")),
                 data=data,
             )
         
@@ -2671,12 +2663,6 @@ def parse_args():
         help="Parallel radii workers",
     )
     ap.add_argument(
-        "--cplex-threads",
-        type=int,
-        default=1,
-        help="Threads for the CPLEX backend.",
-    )
-    ap.add_argument(
         "--out",
         type=str,
         default=os.path.join("results", "results", "results.csv"),
@@ -2750,7 +2736,6 @@ def profile_threshold_incremental_vs_cplex(
     time_limit,
     *,
     instance_name,
-    cplex_threads=1,
     detail_out=None,
     summary_out=None,
 ):
@@ -2911,7 +2896,6 @@ def profile_threshold_incremental_vs_cplex(
                 idx=mid,
                 radius=R,
                 time_limit=time_limit,
-                threads=cplex_threads,
                 data=None,
             )
             cplex_wall = time.perf_counter() - cplex_wall0
@@ -3179,7 +3163,6 @@ def run_experiment(
     search_mode,
     radii_workers,
     *,
-    cplex_threads=1,
     hybrid_threshold=11,
     mgr,
     cancel_dict,
@@ -3218,7 +3201,7 @@ def run_experiment(
 
         print(
             f"[RUN-THRESHOLD] instance={inst_desc['name']} "
-            f"encoding={encoding} sat_solver={sat_solver} cplex_threads={cplex_threads}",
+            f"encoding={encoding} sat_solver={sat_solver}",
             flush=True
         )
 
@@ -3228,7 +3211,6 @@ def run_experiment(
             sat_solver,
             time_limit,
             instance_name=inst_desc["name"],
-            cplex_threads=cplex_threads,
             detail_out=threshold_detail_out,
             summary_out=threshold_summary_out,
         )
@@ -3285,8 +3267,6 @@ def run_experiment(
         solver_encodings = encodings if solver_name != "cplex" else ["setcover"]
         for encoding in solver_encodings:
             for run_id in range(1):
-                if solver_name == "cplex":
-                    os.environ["PCENTER_CPLEX_THREADS"] = str(max(1, int(cplex_threads)))
                 print(
                     f"[RUN] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"encoding={encoding} solver={solver_name} search={search_mode}",
@@ -3318,10 +3298,6 @@ def run_experiment(
 
                 if search_mode == "hybrid_threshold":
                     extra_kwargs["hybrid_threshold"] = hybrid_threshold
-                    extra_kwargs["cplex_threads"] = cplex_threads
-                
-                if search_mode == "hybrid_race":
-                    extra_kwargs["cplex_threads"] = cplex_threads
 
                 status, best_radius, nvars, nclauses, centers, best_sat_cpu, search_elapsed = search_fn(
                     inst,
@@ -3679,7 +3655,6 @@ if __name__ == "__main__":
                 args.time_limit,
                 args.search_mode,
                 args.radii_workers,
-                cplex_threads=args.cplex_threads,
                 hybrid_threshold=args.hybrid_threshold,
                 mgr=MGR,
                 cancel_dict=CANCEL,
