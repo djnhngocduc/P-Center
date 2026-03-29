@@ -19,6 +19,7 @@ import resource
 import atexit, shutil
 import traceback
 import math
+import queue as pyqueue
 
 try:
     import cplex
@@ -750,6 +751,520 @@ def search_min_radius_hybrid_threshold(
         print(
             f"[HYBRID-RESULT] status=OK best_idx={best_sat_idx} "
             f"best_R={best_radius} cpu={best_cpu} threshold={hybrid_threshold}",
+            flush=True
+        )
+
+        search_elapsed = time.perf_counter() - search_t0
+        return (
+            "OK",
+            best_radius,
+            best_nvars,
+            best_nclauses,
+            best_centers,
+            best_cpu,
+            search_elapsed,
+        )
+
+def search_min_radius_hybrid_race(
+    inst,
+    encoding,
+    solver_name,
+    time_limit,
+    *,
+    cplex_threads=1,
+    radii_workers,
+    seed_idx=None,
+    mgr=None,
+    cancel_dict=None
+):
+    """
+    One-controller binary search.
+    For each midpoint radius R:
+      - SAT side:
+          * INTERNAL PySAT solver -> incremental SAT
+          * EXTERNAL solver       -> normal per-radius SAT in a child process
+      - CPLEX side:
+          * always runs in a child process
+      - whichever returns SAT/UNSAT first wins
+      - loser is interrupted/killed
+      - binary search continues with the winner result
+    """
+    search_t0 = time.perf_counter()
+
+    if solver_name == "cplex":
+        raise ValueError("hybrid_race expects a SAT solver in --solvers, not 'cplex'.")
+
+    if cplex is None:
+        raise ImportError("hybrid_race needs CPLEX installed.")
+
+    use_incremental_sat = solver_name not in EXTERNAL_SOLVERS
+
+    # -------------------------------------------------
+    # SAT-side = internal PySAT -> incremental SAT
+    # -------------------------------------------------
+    if use_incremental_sat:
+        base_cnf, info = inst._build_incremental_base_cnf(encoding=encoding)
+        radii = info["radii"]
+        y_vars = info["y"]
+
+        if not radii:
+            search_elapsed = time.perf_counter() - search_t0
+            return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
+
+        lo = 0
+        hi = len(radii) - 1
+
+        next_var = base_cnf.nv + 1
+        tested = {}
+        added_clause_count = 0
+
+        best_sat_idx = None
+        best_centers = None
+        best_cpu = None
+        best_nvars = None
+        best_nclauses = None
+
+        print(
+            f"[HYBRID-RACE-INIT] encoding={encoding} solver={solver_name} "
+            f"sat_mode=incremental p={inst.p} lo={lo} hi={hi} "
+            f"R_lo={radii[lo]} R_hi={radii[hi]} "
+            f"nR={len(radii)} base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv}",
+            flush=True
+        )
+
+        with Solver(name=solver_name, bootstrap_with=base_cnf.clauses) as sat_solver:
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                R = radii[mid]
+
+                if mid not in tested:
+                    alpha = next_var
+                    next_var += 1
+                    tested[mid] = alpha
+
+                    step_clauses = inst._build_incremental_guarded_clauses(
+                        radius=R,
+                        selector_lit=alpha,
+                    )
+                    for cl in step_clauses:
+                        sat_solver.add_clause(cl)
+                    added_clause_count += len(step_clauses)
+
+                    print(
+                        f"[HYBRID-RACE-ADD] idx={mid} R={R} selector={alpha} "
+                        f"added_clauses={len(step_clauses)}",
+                        flush=True
+                    )
+                else:
+                    alpha = tested[mid]
+
+                print(
+                    f"[HYBRID-RACE-STEP] lo={lo} hi={hi} mid={mid} R={R} "
+                    f"sat_backend=incremental cplex_backend=process",
+                    flush=True
+                )
+
+                sat_cancel_ev = threading.Event()
+                sat_thread, sat_q = _run_incremental_sat_once(
+                    sat_solver=sat_solver,
+                    alpha=alpha,
+                    y_vars=y_vars,
+                    time_limit=time_limit,
+                    cancel_ev=sat_cancel_ev,
+                )
+
+                cplex_q = mp.Queue()
+                cplex_proc = mp.Process(
+                    target=_solve_radius_cplex_proc,
+                    args=(inst, mid, R, time_limit, cplex_threads, cplex_q),
+                    daemon=True,
+                )
+                cplex_proc.start()
+
+                winner_backend = None
+                winner_result = None
+                sat_result = None
+                cplex_result = None
+
+                while True:
+                    if sat_result is None:
+                        try:
+                            sat_result = sat_q.get_nowait()
+                        except pyqueue.Empty:
+                            pass
+
+                    if cplex_result is None:
+                        try:
+                            tag, payload = cplex_q.get_nowait()
+                            if tag == "ok":
+                                cplex_result = payload
+                            else:
+                                print(
+                                    f"[HYBRID-RACE-CPLEX-ERROR]\n{payload}",
+                                    file=sys.stderr,
+                                    flush=True
+                                )
+                                cplex_result = (mid, R, "error", 0.0, None, None, None)
+                        except Exception:
+                            pass
+
+                    if sat_result is not None and winner_backend is None:
+                        sat_status, sat_cpu, sat_centers = sat_result
+                        if sat_status in ("sat", "unsat"):
+                            winner_backend = "sat"
+                            winner_result = sat_result
+
+                            _safe_terminate_process(cplex_proc, join_timeout=1.0)
+
+                            print(
+                                f"[HYBRID-RACE-WIN] idx={mid} R={R} winner=SAT "
+                                f"status={sat_status} cpu={sat_cpu:.6f}s",
+                                flush=True
+                            )
+                            break
+
+                    if cplex_result is not None and winner_backend is None:
+                        idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = cplex_result
+                        if c_status in ("sat", "unsat"):
+                            winner_backend = "cplex"
+                            winner_result = cplex_result
+
+                            sat_cancel_ev.set()
+                            sat_thread.join()
+
+                            print(
+                                f"[HYBRID-RACE-WIN] idx={idx2} R={R2} winner=CPLEX "
+                                f"status={c_status} cpu={c_cpu:.6f}s",
+                                flush=True
+                            )
+                            break
+
+                    sat_done = sat_result is not None
+                    cplex_done = (cplex_result is not None) or (not cplex_proc.is_alive())
+
+                    if sat_done and cplex_done and winner_backend is None:
+                        if sat_result is not None and sat_result[0] in ("sat", "unsat"):
+                            winner_backend = "sat"
+                            winner_result = sat_result
+                        elif cplex_result is not None and cplex_result[2] in ("sat", "unsat"):
+                            winner_backend = "cplex"
+                            winner_result = cplex_result
+                        elif sat_result is not None:
+                            winner_backend = "sat"
+                            winner_result = sat_result
+                        elif cplex_result is not None:
+                            winner_backend = "cplex"
+                            winner_result = cplex_result
+                        break
+
+                    time.sleep(0.005)
+
+                _safe_terminate_process(cplex_proc, join_timeout=1.0)
+                _safe_close_mp_queue(cplex_q)
+
+                if winner_backend == "sat":
+                    sat_status, sat_cpu, sat_centers = winner_result
+
+                    if sat_status == "sat":
+                        best_sat_idx = mid
+                        best_centers = sat_centers
+                        best_cpu = sat_cpu
+                        best_nvars = next_var - 1
+                        best_nclauses = len(base_cnf.clauses) + added_clause_count
+                        lo = mid + 1
+
+                    elif sat_status == "unsat":
+                        hi = mid - 1
+
+                    elif sat_status in ("timeout", "cancelled", "error"):
+                        if best_sat_idx is not None:
+                            print(
+                                f"[HYBRID-RACE-FALLBACK] stop on SAT {sat_status}; "
+                                f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                                flush=True
+                            )
+                            break
+
+                        search_elapsed = time.perf_counter() - search_t0
+                        return sat_status, None, next_var - 1, None, None, sat_cpu, search_elapsed
+
+                elif winner_backend == "cplex":
+                    idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = winner_result
+
+                    if c_status == "sat":
+                        best_sat_idx = idx2
+                        best_centers = c_centers
+                        best_cpu = c_cpu
+                        best_nvars = c_nvars
+                        best_nclauses = c_nclauses
+                        lo = idx2 + 1
+
+                    elif c_status == "unsat":
+                        hi = idx2 - 1
+
+                    elif c_status in ("timeout", "error"):
+                        if best_sat_idx is not None:
+                            print(
+                                f"[HYBRID-RACE-FALLBACK] stop on CPLEX {c_status}; "
+                                f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                                flush=True
+                            )
+                            break
+
+                        search_elapsed = time.perf_counter() - search_t0
+                        return c_status, None, c_nvars, c_nclauses, None, c_cpu, search_elapsed
+
+                else:
+                    if best_sat_idx is not None:
+                        print(
+                            f"[HYBRID-RACE-FALLBACK] no decisive winner; "
+                            f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                            flush=True
+                        )
+                        break
+
+                    search_elapsed = time.perf_counter() - search_t0
+                    return "error", None, None, None, None, None, search_elapsed
+
+        if best_sat_idx is None:
+            print("[HYBRID-RACE-RESULT] infeasible (no SAT found)", flush=True)
+            search_elapsed = time.perf_counter() - search_t0
+            return "infeasible", None, None, None, None, None, search_elapsed
+
+        best_radius = radii[best_sat_idx]
+        print(
+            f"[HYBRID-RACE-RESULT] status=OK best_idx={best_sat_idx} "
+            f"best_R={best_radius} cpu={best_cpu}",
+            flush=True
+        )
+
+        search_elapsed = time.perf_counter() - search_t0
+        return (
+            "OK",
+            best_radius,
+            best_nvars,
+            best_nclauses,
+            best_centers,
+            best_cpu,
+            search_elapsed,
+        )
+
+    # -------------------------------------------------
+    # SAT-side = external solver -> per-radius SAT
+    # -------------------------------------------------
+    else:
+        radii = inst.radii
+
+        if not radii:
+            search_elapsed = time.perf_counter() - search_t0
+            return "infeasible", None, None, None, None, None, search_elapsed
+
+        lo = 0
+        hi = len(radii) - 1
+
+        best_sat_idx = None
+        best_centers = None
+        best_cpu = None
+        best_nvars = None
+        best_nclauses = None
+
+        print(
+            f"[HYBRID-RACE-INIT] encoding={encoding} solver={solver_name} "
+            f"sat_mode=external_per_radius p={inst.p} lo={lo} hi={hi} "
+            f"R_lo={radii[lo]} R_hi={radii[hi]} nR={len(radii)}",
+            flush=True
+        )
+
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            R = radii[mid]
+
+            print(
+                f"[HYBRID-RACE-STEP] lo={lo} hi={hi} mid={mid} R={R} "
+                f"sat_backend=external_per_radius cplex_backend=process",
+                flush=True
+            )
+
+            sat_q = mp.Queue()
+            sat_proc = mp.Process(
+                target=_solve_radius_sat_proc,
+                args=(inst, mid, encoding, solver_name, R, time_limit, sat_q),
+                daemon=True,
+            )
+            sat_proc.start()
+
+            cplex_q = mp.Queue()
+            cplex_proc = mp.Process(
+                target=_solve_radius_cplex_proc,
+                args=(inst, mid, R, time_limit, cplex_threads, cplex_q),
+                daemon=True,
+            )
+            cplex_proc.start()
+
+            winner_backend = None
+            winner_result = None
+            sat_result = None
+            cplex_result = None
+
+            while True:
+                if sat_result is None:
+                    try:
+                        tag, payload = sat_q.get_nowait()
+                        if tag == "ok":
+                            sat_result = payload
+                        else:
+                            print(
+                                f"[HYBRID-RACE-SAT-ERROR]\n{payload}",
+                                file=sys.stderr,
+                                flush=True
+                            )
+                            sat_result = (mid, R, "error", 0.0, None, None, None)
+                    except Exception:
+                        pass
+
+                if cplex_result is None:
+                    try:
+                        tag, payload = cplex_q.get_nowait()
+                        if tag == "ok":
+                            cplex_result = payload
+                        else:
+                            print(
+                                f"[HYBRID-RACE-CPLEX-ERROR]\n{payload}",
+                                file=sys.stderr,
+                                flush=True
+                            )
+                            cplex_result = (mid, R, "error", 0.0, None, None, None)
+                    except Exception:
+                        pass
+
+                if sat_result is not None and winner_backend is None:
+                    idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = sat_result
+                    if s_status in ("sat", "unsat"):
+                        winner_backend = "sat"
+                        winner_result = sat_result
+
+                        _safe_terminate_process(cplex_proc, join_timeout=1.0)
+
+                        print(
+                            f"[HYBRID-RACE-WIN] idx={idx1} R={R1} winner=SAT "
+                            f"status={s_status} cpu={s_cpu:.6f}s",
+                            flush=True
+                        )
+                        break
+
+                if cplex_result is not None and winner_backend is None:
+                    idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = cplex_result
+                    if c_status in ("sat", "unsat"):
+                        winner_backend = "cplex"
+                        winner_result = cplex_result
+
+                        _safe_terminate_process(sat_proc, join_timeout=1.0)
+
+                        print(
+                            f"[HYBRID-RACE-WIN] idx={idx2} R={R2} winner=CPLEX "
+                            f"status={c_status} cpu={c_cpu:.6f}s",
+                            flush=True
+                        )
+                        break
+
+                sat_done = (sat_result is not None) or (not sat_proc.is_alive())
+                cplex_done = (cplex_result is not None) or (not cplex_proc.is_alive())
+
+                if sat_done and cplex_done and winner_backend is None:
+                    if sat_result is not None and sat_result[2] in ("sat", "unsat"):
+                        winner_backend = "sat"
+                        winner_result = sat_result
+                    elif cplex_result is not None and cplex_result[2] in ("sat", "unsat"):
+                        winner_backend = "cplex"
+                        winner_result = cplex_result
+                    elif sat_result is not None:
+                        winner_backend = "sat"
+                        winner_result = sat_result
+                    elif cplex_result is not None:
+                        winner_backend = "cplex"
+                        winner_result = cplex_result
+                    break
+
+                time.sleep(0.005)
+
+            _safe_terminate_process(sat_proc, join_timeout=1.0)
+            _safe_terminate_process(cplex_proc, join_timeout=1.0)
+            _safe_close_mp_queue(sat_q)
+            _safe_close_mp_queue(cplex_q)
+
+            if winner_backend == "sat":
+                idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = winner_result
+
+                if s_status == "sat":
+                    best_sat_idx = idx1
+                    best_centers = s_centers
+                    best_cpu = s_cpu
+                    best_nvars = s_nvars
+                    best_nclauses = s_nclauses
+                    lo = idx1 + 1
+
+                elif s_status == "unsat":
+                    hi = idx1 - 1
+
+                elif s_status in ("timeout", "error"):
+                    if best_sat_idx is not None:
+                        print(
+                            f"[HYBRID-RACE-FALLBACK] stop on SAT {s_status}; "
+                            f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                            flush=True
+                        )
+                        break
+
+                    search_elapsed = time.perf_counter() - search_t0
+                    return s_status, None, s_nvars, s_nclauses, None, s_cpu, search_elapsed
+
+            elif winner_backend == "cplex":
+                idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = winner_result
+
+                if c_status == "sat":
+                    best_sat_idx = idx2
+                    best_centers = c_centers
+                    best_cpu = c_cpu
+                    best_nvars = c_nvars
+                    best_nclauses = c_nclauses
+                    lo = idx2 + 1
+
+                elif c_status == "unsat":
+                    hi = idx2 - 1
+
+                elif c_status in ("timeout", "error"):
+                    if best_sat_idx is not None:
+                        print(
+                            f"[HYBRID-RACE-FALLBACK] stop on CPLEX {c_status}; "
+                            f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                            flush=True
+                        )
+                        break
+
+                    search_elapsed = time.perf_counter() - search_t0
+                    return c_status, None, c_nvars, c_nclauses, None, c_cpu, search_elapsed
+
+            else:
+                if best_sat_idx is not None:
+                    print(
+                        f"[HYBRID-RACE-FALLBACK] no decisive winner; "
+                        f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                        flush=True
+                    )
+                    break
+
+                search_elapsed = time.perf_counter() - search_t0
+                return "error", None, None, None, None, None, search_elapsed
+
+        if best_sat_idx is None:
+            print("[HYBRID-RACE-RESULT] infeasible (no SAT found)", flush=True)
+            search_elapsed = time.perf_counter() - search_t0
+            return "infeasible", None, None, None, None, None, search_elapsed
+
+        best_radius = radii[best_sat_idx]
+        print(
+            f"[HYBRID-RACE-RESULT] status=OK best_idx={best_sat_idx} "
+            f"best_R={best_radius} cpu={best_cpu}",
             flush=True
         )
 
@@ -1755,6 +2270,175 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, threads=1, data=None):
     )
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
+def _solve_radius_cplex_proc(inst, idx, radius, time_limit, threads, out_q):
+    try:
+        res = _solve_radius_cplex(
+            inst=inst,
+            idx=idx,
+            radius=radius,
+            time_limit=time_limit,
+            threads=threads,
+            data=None,
+        )
+        out_q.put(("ok", res))
+    except Exception:
+        tb = traceback.format_exc()
+        out_q.put(("error", tb))
+
+def _solve_radius_sat_proc(inst, idx, encoding, solver_name, radius, time_limit, out_q):
+    """
+    Run one SAT solve for one radius in a dedicated process.
+    Works for:
+      - external solvers
+      - internal non-incremental worker mode
+    """
+    try:
+        global _INST_SHARED, _CANCEL_SHARED, _LOCAL_TMPDIR
+
+        _INST_SHARED = inst
+        _CANCEL_SHARED = None
+
+        base_tmp = "/dev/shm" if os.path.isdir("/dev/shm") else None
+        _LOCAL_TMPDIR = tempfile.mkdtemp(prefix="pcsat_race_", dir=base_tmp)
+
+        try:
+            res = _solve_radius_worker_proc(
+                idx,
+                encoding,
+                solver_name,
+                radius,
+                time_limit,
+            )
+            out_q.put(("ok", res))
+        finally:
+            try:
+                if _LOCAL_TMPDIR and os.path.isdir(_LOCAL_TMPDIR):
+                    shutil.rmtree(_LOCAL_TMPDIR, ignore_errors=True)
+            except Exception:
+                pass
+            _LOCAL_TMPDIR = None
+
+    except Exception:
+        tb = traceback.format_exc()
+        out_q.put(("error", tb))
+
+def _run_incremental_sat_once(
+    sat_solver,
+    alpha,
+    y_vars,
+    time_limit,
+    cancel_ev,
+):
+    """
+    Run one incremental SAT call with assumptions=[alpha].
+    Return:
+        sat_thread, out_q
+
+    out_q will receive one tuple:
+        ("sat", cpu_sec, centers)
+        ("unsat", cpu_sec, None)
+        ("timeout", cpu_sec, None)
+        ("cancelled", cpu_sec, None)
+        ("error", 0.0, None)
+    """
+    done_ev = threading.Event()
+    out_q = pyqueue.Queue()
+
+    def _worker():
+        timer = None
+        cpu0 = None
+        cpu1 = None
+
+        try:
+            if cancel_ev is not None and hasattr(sat_solver, "interrupt"):
+                def _watch_cancel():
+                    cancel_ev.wait()
+                    if not done_ev.is_set():
+                        try:
+                            sat_solver.interrupt()
+                        except Exception:
+                            pass
+
+                threading.Thread(target=_watch_cancel, daemon=True).start()
+
+            if time_limit and time_limit > 0 and hasattr(sat_solver, "interrupt"):
+                timer = threading.Timer(time_limit, sat_solver.interrupt)
+                timer.start()
+                cpu0 = _cpu_self_seconds()
+                try:
+                    sat_res = sat_solver.solve_limited(
+                        assumptions=[alpha],
+                        expect_interrupt=True
+                    )
+                except NotImplementedError:
+                    sat_res = sat_solver.solve(assumptions=[alpha])
+                cpu1 = _cpu_self_seconds()
+            else:
+                cpu0 = _cpu_self_seconds()
+                sat_res = sat_solver.solve(assumptions=[alpha])
+                cpu1 = _cpu_self_seconds()
+
+            cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
+
+            if sat_res is None:
+                if cancel_ev is not None and cancel_ev.is_set():
+                    out_q.put(("cancelled", cpu_sec, None))
+                else:
+                    out_q.put(("timeout", cpu_sec, None))
+                return
+
+            if sat_res:
+                model = sat_solver.get_model() or []
+                model_set = set(model)
+                centers = sorted([j for j, v in enumerate(y_vars) if v in model_set])
+                out_q.put(("sat", cpu_sec, centers))
+            else:
+                out_q.put(("unsat", cpu_sec, None))
+
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"[HYBRID-RACE-SAT-ERROR]\n{tb}", file=sys.stderr, flush=True)
+            out_q.put(("error", 0.0, None))
+        finally:
+            if timer:
+                timer.cancel()
+            done_ev.set()
+            if hasattr(sat_solver, "clear_interrupt"):
+                try:
+                    sat_solver.clear_interrupt()
+                except Exception:
+                    pass
+
+    sat_thread = threading.Thread(target=_worker, daemon=True)
+    sat_thread.start()
+    return sat_thread, out_q
+
+def _safe_terminate_process(proc, join_timeout=1.0):
+    if proc is None:
+        return
+    try:
+        if proc.is_alive():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        proc.join(timeout=join_timeout)
+    except Exception:
+        pass
+
+
+def _safe_close_mp_queue(q):
+    if q is None:
+        return
+    try:
+        q.close()
+    except Exception:
+        pass
+    try:
+        q.join_thread()
+    except Exception:
+        pass
+
 def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     pid = os.getpid()
     print(
@@ -1977,8 +2661,8 @@ def parse_args():
         "--search-mode",
         type=str,
         default="parallel",
-        choices=["parallel", "binary", "kary", "incremental", "threshold_profile", "hybrid_threshold"],
-        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile, or hybrid_threshold",
+        choices=["parallel", "binary", "kary", "incremental", "threshold_profile", "hybrid_threshold", "hybrid_race"],
+        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile, or hybrid_threshold, or hybrid_race",
     )
     ap.add_argument(
         "--radii-workers",
@@ -1990,7 +2674,7 @@ def parse_args():
         "--cplex-threads",
         type=int,
         default=1,
-        help="Threads for the CPLEX backend (binary search only).",
+        help="Threads for the CPLEX backend.",
     )
     ap.add_argument(
         "--out",
@@ -2502,8 +3186,8 @@ def run_experiment(
     threshold_detail_out=None,
     threshold_summary_out=None,
 ):
-    if "cplex" in solvers and search_mode not in ("binary", "threshold_profile", "hybrid_threshold"):
-        raise ValueError("CPLEX backend currently supports only binary search, threshold_profile, or hybrid_threshold.")
+    if "cplex" in solvers and search_mode not in ("binary", "threshold_profile", "hybrid_threshold", "hybrid_race"):
+        raise ValueError("CPLEX backend currently supports only binary search, threshold_profile, or hybrid_threshold, or hybrid_race.")
     
     results = []
     load_t0 = time.perf_counter()
@@ -2588,6 +3272,15 @@ def run_experiment(
                 "hybrid_threshold needs a SAT solver in --solvers, not 'cplex'."
             )
 
+    if search_mode == "hybrid_race":
+        if len(solvers) != 1:
+            raise ValueError(
+                "hybrid_race expects exactly one SAT solver in --solvers. "
+                "Do not include cplex here because CPLEX is used internally."
+            )
+        if solvers[0] == "cplex":
+            raise ValueError("hybrid_race needs a SAT solver in --solvers, not 'cplex'.")
+
     for solver_name in solvers:
         solver_encodings = encodings if solver_name != "cplex" else ["setcover"]
         for encoding in solver_encodings:
@@ -2609,6 +3302,8 @@ def run_experiment(
                     search_fn = search_min_radius_incremental
                 elif search_mode == "hybrid_threshold":
                     search_fn = search_min_radius_hybrid_threshold
+                elif search_mode == "hybrid_race":
+                    search_fn = search_min_radius_hybrid_race
                 else:
                     raise ValueError(f"Unknown search_mode: {search_mode}")
 
@@ -2623,6 +3318,9 @@ def run_experiment(
 
                 if search_mode == "hybrid_threshold":
                     extra_kwargs["hybrid_threshold"] = hybrid_threshold
+                    extra_kwargs["cplex_threads"] = cplex_threads
+                
+                if search_mode == "hybrid_race":
                     extra_kwargs["cplex_threads"] = cplex_threads
 
                 status, best_radius, nvars, nclauses, centers, best_sat_cpu, search_elapsed = search_fn(
@@ -2671,7 +3369,7 @@ def run_experiment(
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "cplex": 6}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "threshold_profile": 4, "hybrid_threshold": 5}
+    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "threshold_profile": 4, "hybrid_threshold": 5, "hybrid_race": 6}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
