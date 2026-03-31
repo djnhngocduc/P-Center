@@ -781,6 +781,11 @@ def search_min_radius_hybrid_race(
       - one long-lived CPLEX worker
       - at each midpoint, dispatch same radius to both workers
       - first decisive result (sat/unsat) wins
+
+    Note:
+      - INTERNAL incremental SAT can still be cancelled via local threading.Event()
+      - EXTERNAL SAT / CPLEX persistent workers do NOT receive manager Events through queues
+        (to avoid multiprocessing manager proxy errors)
     """
     search_t0 = time.perf_counter()
 
@@ -789,11 +794,6 @@ def search_min_radius_hybrid_race(
 
     if cplex is None:
         raise ImportError("hybrid_race needs CPLEX installed.")
-
-    def _make_cancel_event():
-        if mgr is not None:
-            return mgr.Event()
-        return mp.Event()
 
     use_incremental_sat = solver_name not in EXTERNAL_SOLVERS
     radii = inst.radii
@@ -862,28 +862,25 @@ def search_min_radius_hybrid_race(
                 flush=True
             )
 
-            # per-step cancel events
-            sat_cancel_ev = None
-            cplex_cancel_ev = _make_cancel_event()
-
             sat_thread = None
             sat_local_q = None
 
+            # only internal incremental SAT uses real cancel
+            sat_cancel_ev = threading.Event() if use_incremental_sat else None
+
             if use_incremental_sat:
-                sat_cancel_ev = threading.Event()
                 sat_thread, sat_local_q = sat_worker.solve_radius(
                     idx=mid,
                     radius=R,
                     cancel_ev=sat_cancel_ev,
                 )
             else:
-                sat_cancel_ev = _make_cancel_event()
                 sat_in_q.put({
                     "cmd": "solve",
                     "step": step,
                     "idx": mid,
                     "radius": R,
-                    "cancel_ev": sat_cancel_ev,
+                    "cancel_ev": None,
                 })
 
             cplex_in_q.put({
@@ -891,7 +888,7 @@ def search_min_radius_hybrid_race(
                 "step": step,
                 "idx": mid,
                 "radius": R,
-                "cancel_ev": cplex_cancel_ev,
+                "cancel_ev": None,
             })
 
             winner_backend = None
@@ -906,8 +903,6 @@ def search_min_radius_hybrid_race(
                         if sat_status in ("sat", "unsat"):
                             winner_backend = "sat"
                             winner_result = (mid, R, sat_status, sat_cpu, None, None, sat_centers)
-
-                            cplex_cancel_ev.set()
 
                             print(
                                 f"[HYBRID-RACE-PERSISTENT-WIN] step={step} idx={mid} R={R} "
@@ -928,8 +923,6 @@ def search_min_radius_hybrid_race(
                                 if s_status in ("sat", "unsat"):
                                     winner_backend = "sat"
                                     winner_result = payload
-
-                                    cplex_cancel_ev.set()
 
                                     print(
                                         f"[HYBRID-RACE-PERSISTENT-WIN] step={step} idx={idx1} R={R1} "
@@ -955,8 +948,6 @@ def search_min_radius_hybrid_race(
                                 if use_incremental_sat:
                                     sat_cancel_ev.set()
                                     sat_thread.join()
-                                else:
-                                    sat_cancel_ev.set()
 
                                 print(
                                     f"[HYBRID-RACE-PERSISTENT-WIN] step={step} idx={idx2} R={R2} "
@@ -2031,21 +2022,10 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     )
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
-class _AborterCallback:
-    def __init__(self):
-        self._flag = False
-
-    def __call__(self):
-        return bool(self._flag)
-
-    def abort(self):
-        self._flag = True
-
-
 def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
     """
     Solve one radius with CPLEX inside a persistent worker process.
-    Uses a watcher thread + aborter so the current solve can be cancelled.
+    Uses the built-in CPLEX Aborter so the current solve can be cancelled.
     """
     if cplex is None:
         raise ImportError(
@@ -2072,7 +2052,7 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
 
-    # KHÔNG set threads -> để CPLEX tự dùng mặc định theo máy/runtime
+    # do NOT set threads here; let CPLEX use its default/runtime setting
     names = [f"x_{j}" for j in range(n)]
     model.variables.add(
         obj=[0.0] * n,
@@ -2097,20 +2077,18 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
         names=["atmost_p"],
     )
 
-    aborter_cb = _AborterCallback()
-    model.use_aborter(aborter_cb)
+    aborter = cplex.Aborter()
+    model.use_aborter(aborter)
 
-    cancel_thread = None
     if cancel_ev is not None:
         def _watch_cancel():
             cancel_ev.wait()
             try:
-                aborter_cb.abort()
+                aborter.abort()
             except Exception:
                 pass
 
-        cancel_thread = threading.Thread(target=_watch_cancel, daemon=True)
-        cancel_thread.start()
+        threading.Thread(target=_watch_cancel, daemon=True).start()
 
     cpu0 = _cpu_self_seconds()
     model.solve()
@@ -2144,7 +2122,6 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
         return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
 
     if ("time limit" in status_name) or ("abort" in status_name) or ("limit" in status_name):
-        # nếu bị cancel thì CPLEX thường rơi vào abort/limit -> xem như timeout
         return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
 
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
