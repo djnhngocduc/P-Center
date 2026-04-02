@@ -775,29 +775,24 @@ def search_min_radius_hybrid_race(
     cancel_dict=None
 ):
     """
-    Persistent-worker hybrid race:
+    Optimized hybrid race:
       - one binary-search controller
-      - one long-lived SAT worker
+      - one long-lived SAT worker (external) or local incremental SAT thread
       - one long-lived CPLEX worker
-      - at each midpoint, dispatch same radius to both workers
-      - first decisive result (sat/unsat) wins
-
-    Note:
-      - INTERNAL incremental SAT can still be cancelled via local threading.Event()
-      - EXTERNAL SAT / CPLEX persistent workers do NOT receive manager Events through queues
-        (to avoid multiprocessing manager proxy errors)
+      - shared result queues, dedicated control queues for prompt cancellation
+      - winner of each radius step is the first decisive SAT/UNSAT result
+      - loser must be cancelled before next step to reduce search_wall overhead
+      - incremental SAT must fully stop before reusing the persistent solver
     """
     search_t0 = time.perf_counter()
 
     if solver_name == "cplex":
         raise ValueError("hybrid_race expects a SAT solver in --solvers, not 'cplex'.")
-
     if cplex is None:
         raise ImportError("hybrid_race needs CPLEX installed.")
 
     use_incremental_sat = solver_name not in EXTERNAL_SOLVERS
     radii = inst.radii
-
     if not radii:
         search_elapsed = time.perf_counter() - search_t0
         return "infeasible", None, None, None, None, None, search_elapsed
@@ -813,18 +808,20 @@ def search_min_radius_hybrid_race(
 
     step_counter = itertools.count(1)
 
-    cplex_in_q = mp.Queue()
-    cplex_out_q = mp.Queue()
+    cplex_job_q = mp.Queue()
+    cplex_ctl_q = mp.Queue()
+    cplex_result_q = mp.Queue()
     cplex_proc = mp.Process(
         target=_cplex_worker_loop,
-        args=(inst, cplex_in_q, cplex_out_q, time_limit),
+        args=(inst, cplex_job_q, cplex_ctl_q, cplex_result_q, time_limit),
         daemon=True,
     )
     cplex_proc.start()
 
     sat_proc = None
-    sat_in_q = None
-    sat_out_q = None
+    sat_job_q = None
+    sat_ctl_q = None
+    sat_result_q = None
     sat_worker = None
 
     try:
@@ -836,20 +833,21 @@ def search_min_radius_hybrid_race(
                 time_limit=time_limit,
             )
         else:
-            sat_in_q = mp.Queue()
-            sat_out_q = mp.Queue()
+            sat_job_q = mp.Queue()
+            sat_ctl_q = mp.Queue()
+            sat_result_q = mp.Queue()
             sat_proc = mp.Process(
                 target=_external_sat_worker_loop,
-                args=(inst, encoding, solver_name, sat_in_q, sat_out_q, time_limit),
+                args=(inst, encoding, solver_name, sat_job_q, sat_ctl_q, sat_result_q, time_limit),
                 daemon=True,
             )
             sat_proc.start()
 
         print(
-            f"[HYBRID-RACE-PERSISTENT-INIT] encoding={encoding} solver={solver_name} "
+            f"[HYBRID-RACE-OPT-INIT] encoding={encoding} solver={solver_name} "
             f"sat_mode={'incremental' if use_incremental_sat else 'external_per_radius'} "
             f"p={inst.p} lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={len(radii)}",
-            flush=True
+            flush=True,
         )
 
         while lo <= hi:
@@ -858,65 +856,49 @@ def search_min_radius_hybrid_race(
             step = next(step_counter)
 
             print(
-                f"[HYBRID-RACE-PERSISTENT-STEP] step={step} lo={lo} hi={hi} mid={mid} R={R}",
-                flush=True
+                f"[HYBRID-RACE-OPT-STEP] step={step} lo={lo} hi={hi} mid={mid} R={R}",
+                flush=True,
             )
 
             sat_thread = None
             sat_local_q = None
-
-            # only internal incremental SAT uses real cancel
             sat_cancel_ev = threading.Event() if use_incremental_sat else None
 
             if use_incremental_sat:
                 sat_thread, sat_local_q = sat_worker.solve_radius(
-                    idx=mid,
-                    radius=R,
-                    cancel_ev=sat_cancel_ev,
+                    idx=mid, radius=R, cancel_ev=sat_cancel_ev
                 )
             else:
-                sat_in_q.put({
-                    "cmd": "solve",
-                    "step": step,
-                    "idx": mid,
-                    "radius": R,
-                    "cancel_ev": None,
-                })
+                sat_job_q.put({"cmd": "solve", "step": step, "idx": mid, "radius": R})
 
-            cplex_in_q.put({
-                "cmd": "solve",
-                "step": step,
-                "idx": mid,
-                "radius": R,
-                "cancel_ev": None,
-            })
+            cplex_job_q.put({"cmd": "solve", "step": step, "idx": mid, "radius": R})
 
             winner_backend = None
             winner_result = None
 
             while True:
-                # INTERNAL SAT result
                 if use_incremental_sat and sat_local_q is not None:
                     try:
-                        sat_res = sat_local_q.get_nowait()
-                        sat_status, sat_cpu, sat_centers = sat_res
+                        sat_status, sat_cpu, sat_centers = sat_local_q.get_nowait()
                         if sat_status in ("sat", "unsat"):
                             winner_backend = "sat"
                             winner_result = (mid, R, sat_status, sat_cpu, None, None, sat_centers)
 
+                            _safe_put(cplex_ctl_q, {"cmd": "cancel", "step": step})
+                            _wait_for_cancel_ack(cplex_result_q, step, timeout=1.0)
+
                             print(
-                                f"[HYBRID-RACE-PERSISTENT-WIN] step={step} idx={mid} R={R} "
+                                f"[HYBRID-RACE-OPT-WIN] step={step} idx={mid} R={R} "
                                 f"winner=SAT status={sat_status} cpu={sat_cpu:.6f}s",
-                                flush=True
+                                flush=True,
                             )
                             break
                     except pyqueue.Empty:
                         pass
 
-                # EXTERNAL SAT result
-                if (not use_incremental_sat) and sat_out_q is not None:
+                if (not use_incremental_sat) and sat_result_q is not None:
                     try:
-                        tag, step_got, payload = sat_out_q.get_nowait()
+                        tag, step_got, payload = sat_result_q.get_nowait()
                         if step_got == step:
                             if tag == "result":
                                 idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = payload
@@ -924,20 +906,24 @@ def search_min_radius_hybrid_race(
                                     winner_backend = "sat"
                                     winner_result = payload
 
+                                    _safe_put(cplex_ctl_q, {"cmd": "cancel", "step": step})
+                                    _wait_for_cancel_ack(cplex_result_q, step, timeout=1.0)
+
                                     print(
-                                        f"[HYBRID-RACE-PERSISTENT-WIN] step={step} idx={idx1} R={R1} "
+                                        f"[HYBRID-RACE-OPT-WIN] step={step} idx={idx1} R={R1} "
                                         f"winner=SAT status={s_status} cpu={s_cpu:.6f}s",
-                                        flush=True
+                                        flush=True,
                                     )
                                     break
-                            else:
+                            elif tag == "error":
                                 print(f"[HYBRID-RACE-SAT-ERROR]\n{payload}", file=sys.stderr, flush=True)
+                    except pyqueue.Empty:
+                        pass
                     except Exception:
                         pass
 
-                # CPLEX result
                 try:
-                    tag, step_got, payload = cplex_out_q.get_nowait()
+                    tag, step_got, payload = cplex_result_q.get_nowait()
                     if step_got == step:
                         if tag == "result":
                             idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = payload
@@ -947,24 +933,48 @@ def search_min_radius_hybrid_race(
 
                                 if use_incremental_sat:
                                     sat_cancel_ev.set()
-                                    sat_thread.join()
+
+                                    sat_terminal = None
+                                    deadline = time.perf_counter() + 1.0
+                                    while time.perf_counter() < deadline:
+                                        try:
+                                            sat_terminal = sat_local_q.get(timeout=0.02)
+                                            break
+                                        except pyqueue.Empty:
+                                            pass
+                                        except Exception:
+                                            break
+
+                                    try:
+                                        sat_thread.join(timeout=0.1)
+                                    except Exception:
+                                        pass
+
+                                    if sat_thread.is_alive():
+                                        raise RuntimeError(
+                                            f"Incremental SAT thread did not stop cleanly at step={step}"
+                                        )
+                                else:
+                                    _safe_put(sat_ctl_q, {"cmd": "cancel", "step": step})
+                                    _wait_for_cancel_ack(sat_result_q, step, timeout=1.0)
 
                                 print(
-                                    f"[HYBRID-RACE-PERSISTENT-WIN] step={step} idx={idx2} R={R2} "
+                                    f"[HYBRID-RACE-OPT-WIN] step={step} idx={idx2} R={R2} "
                                     f"winner=CPLEX status={c_status} cpu={c_cpu:.6f}s",
-                                    flush=True
+                                    flush=True,
                                 )
                                 break
-                        else:
+                        elif tag == "error":
                             print(f"[HYBRID-RACE-CPLEX-ERROR]\n{payload}", file=sys.stderr, flush=True)
+                except pyqueue.Empty:
+                    pass
                 except Exception:
                     pass
 
-                time.sleep(0.001)
+                time.sleep(0.0005)
 
             if winner_backend == "sat":
                 idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = winner_result
-
                 if s_status == "sat":
                     best_sat_idx = idx1
                     best_centers = s_centers
@@ -981,7 +991,6 @@ def search_min_radius_hybrid_race(
 
             elif winner_backend == "cplex":
                 idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = winner_result
-
                 if c_status == "sat":
                     best_sat_idx = idx2
                     best_centers = c_centers
@@ -1002,20 +1011,22 @@ def search_min_radius_hybrid_race(
         if sat_worker is not None:
             sat_worker.close()
 
-        if sat_in_q is not None:
-            _safe_put(sat_in_q, {"cmd": "stop"})
-            _safe_put(sat_in_q, None)
+        if sat_job_q is not None:
+            _safe_put(sat_ctl_q, {"cmd": "stop"})
+            _safe_put(sat_job_q, None)
         if sat_proc is not None:
             sat_proc.join(timeout=1)
 
-        _safe_put(cplex_in_q, {"cmd": "stop"})
-        _safe_put(cplex_in_q, None)
+        _safe_put(cplex_ctl_q, {"cmd": "stop"})
+        _safe_put(cplex_job_q, None)
         cplex_proc.join(timeout=1)
 
-        _safe_close_queue_like(cplex_in_q)
-        _safe_close_queue_like(cplex_out_q)
-        _safe_close_queue_like(sat_in_q)
-        _safe_close_queue_like(sat_out_q)
+        _safe_close_queue_like(cplex_job_q)
+        _safe_close_queue_like(cplex_ctl_q)
+        _safe_close_queue_like(cplex_result_q)
+        _safe_close_queue_like(sat_job_q)
+        _safe_close_queue_like(sat_ctl_q)
+        _safe_close_queue_like(sat_result_q)
 
     if best_sat_idx is None:
         search_elapsed = time.perf_counter() - search_t0
@@ -2052,7 +2063,6 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
 
-    # do NOT set threads here; let CPLEX use its default/runtime setting
     names = [f"x_{j}" for j in range(n)]
     model.variables.add(
         obj=[0.0] * n,
@@ -2087,7 +2097,6 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
                 aborter.abort()
             except Exception:
                 pass
-
         threading.Thread(target=_watch_cancel, daemon=True).start()
 
     cpu0 = _cpu_self_seconds()
@@ -2126,37 +2135,174 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
 
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
-def _cplex_worker_loop(inst, in_q, out_q, time_limit):
-    """
-    Persistent CPLEX worker.
-    Cancel is done through a per-step cancel Event passed inside the solve message.
-    """
+
+def _cplex_solve_child(inst, step, idx, radius, time_limit, out_q):
+    try:
+        res = _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None)
+        out_q.put(("result", step, res))
+    except Exception:
+        out_q.put(("error", step, traceback.format_exc()))
+
+
+def _external_sat_solve_child(inst, encoding, solver_name, step, idx, radius, time_limit, out_q):
+    try:
+        res = _solve_radius_external_once(inst, idx, encoding, solver_name, radius, time_limit, cancel_ev=None)
+        out_q.put(("result", step, res))
+    except Exception:
+        out_q.put(("error", step, traceback.format_exc()))
+
+
+def _drain_control_queue(control_q, pending_cancel_steps):
     while True:
-        msg = in_q.get()
+        try:
+            msg = control_q.get_nowait()
+        except pyqueue.Empty:
+            break
+        except Exception:
+            break
+        if msg is None:
+            continue
+        cmd = msg.get("cmd")
+        if cmd == "cancel":
+            pending_cancel_steps.add(msg.get("step"))
+        elif cmd == "stop":
+            pending_cancel_steps.add("__STOP__")
+
+def _terminate_process_fast(proc, *, grace=0.05):
+    if proc is None:
+        return
+    try:
+        if not proc.is_alive():
+            return
+    except Exception:
+        return
+
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+
+    try:
+        proc.join(timeout=grace)
+    except Exception:
+        pass
+
+    try:
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=grace)
+    except Exception:
+        pass
+
+
+def _wait_for_cancel_ack(result_q, step, timeout=1.0):
+    """
+    Wait until the losing worker confirms this step has terminated
+    (cancelled, or already ended with result/error).
+    """
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        remaining = max(0.0, deadline - time.perf_counter())
+        try:
+            tag, step_got, payload = result_q.get(timeout=min(0.02, remaining))
+        except pyqueue.Empty:
+            continue
+        except Exception:
+            return None
+
+        if step_got != step:
+            # stale message from previous step; ignore
+            continue
+
+        if tag in ("cancelled", "result", "error"):
+            return (tag, payload)
+
+    return None
+
+def _cplex_worker_loop(inst, job_q, control_q, result_q, time_limit):
+    """Persistent CPLEX worker that runs each solve in a killable child process."""
+    pending_cancel_steps = set()
+
+    while True:
+        _drain_control_queue(control_q, pending_cancel_steps)
+        if "__STOP__" in pending_cancel_steps:
+            break
+
+        msg = job_q.get()
         if msg is None:
             break
+        if msg.get("cmd") != "solve":
+            continue
 
-        cmd = msg.get("cmd")
-        if cmd == "solve":
-            step = msg["step"]
-            idx = msg["idx"]
-            radius = msg["radius"]
-            cancel_ev = msg.get("cancel_ev", None)
+        step = msg["step"]
+        idx = msg["idx"]
+        radius = msg["radius"]
+
+        if step in pending_cancel_steps:
+            pending_cancel_steps.discard(step)
+            result_q.put(("cancelled", step, None))
+            continue
+
+        child_q = mp.Queue()
+        child = mp.Process(
+            target=_cplex_solve_child,
+            args=(inst, step, idx, radius, time_limit, child_q),
+            daemon=True,
+        )
+        child.start()
+
+        sent_terminal_msg = False
+
+        while True:
+            _drain_control_queue(control_q, pending_cancel_steps)
+
+            if step in pending_cancel_steps:
+                pending_cancel_steps.discard(step)
+                _terminate_process_fast(child)
+                result_q.put(("cancelled", step, None))
+                sent_terminal_msg = True
+                break
 
             try:
-                res = _cplex_solve_with_abort(
-                    inst=inst,
-                    idx=idx,
-                    radius=radius,
-                    time_limit=time_limit,
-                    cancel_ev=cancel_ev,
-                )
-                out_q.put(("result", step, res))
+                item = child_q.get_nowait()
+                result_q.put(item)
+                sent_terminal_msg = True
+                break
+            except pyqueue.Empty:
+                pass
             except Exception:
-                out_q.put(("error", step, traceback.format_exc()))
+                pass
 
-        elif cmd == "stop":
-            break
+            if not child.is_alive():
+                break
+
+            time.sleep(0.0005)
+
+        try:
+            child.join(timeout=0.1)
+        except Exception:
+            pass
+
+        # very important: child may have finished and pushed a result
+        # slightly before/after parent observed is_alive() == False
+        if not sent_terminal_msg:
+            try:
+                item = child_q.get_nowait()
+                result_q.put(item)
+                sent_terminal_msg = True
+            except pyqueue.Empty:
+                pass
+            except Exception:
+                pass
+
+        if (not sent_terminal_msg) and (not child.is_alive()):
+            result_q.put(("cancelled", step, None))
+
+        try:
+            child_q.close()
+            child_q.join_thread()
+        except Exception:
+            pass
 
 class _PersistentIncrementalSATWorker:
     def __init__(self, inst, encoding, solver_name, time_limit):
@@ -2269,8 +2415,8 @@ class _PersistentIncrementalSATWorker:
 
 def _solve_radius_external_once(inst, idx, encoding, solver_name, radius, time_limit, cancel_ev=None):
     """
-    External SAT solve for one radius inside a persistent worker process.
-    Supports true cancellation via cancel_ev passed to _run_external_solver().
+    External SAT solve for one radius inside a worker process.
+    Cancellation is handled by killing the child process that runs this function.
     """
     cnf, varmap = inst._encode_cnf(radius, encoding)
 
@@ -2305,52 +2451,90 @@ def _solve_radius_external_once(inst, idx, encoding, solver_name, radius, time_l
 
     return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
 
-def _external_sat_worker_loop(inst, encoding, solver_name, in_q, out_q, time_limit):
-    """
-    Persistent external SAT worker.
-    The process stays alive; each solve gets its own cancel Event.
-    """
-    global _LOCAL_TMPDIR
 
-    base_tmp = "/dev/shm" if os.path.isdir("/dev/shm") else None
-    _LOCAL_TMPDIR = tempfile.mkdtemp(prefix="pcsat_persistent_", dir=base_tmp)
+def _external_sat_worker_loop(inst, encoding, solver_name, job_q, control_q, result_q, time_limit):
+    """Persistent external SAT worker that runs each solve in a killable child process."""
+    pending_cancel_steps = set()
 
-    try:
+    while True:
+        _drain_control_queue(control_q, pending_cancel_steps)
+        if "__STOP__" in pending_cancel_steps:
+            break
+
+        msg = job_q.get()
+        if msg is None:
+            break
+        if msg.get("cmd") != "solve":
+            continue
+
+        step = msg["step"]
+        idx = msg["idx"]
+        radius = msg["radius"]
+
+        if step in pending_cancel_steps:
+            pending_cancel_steps.discard(step)
+            result_q.put(("cancelled", step, None))
+            continue
+
+        child_q = mp.Queue()
+        child = mp.Process(
+            target=_external_sat_solve_child,
+            args=(inst, encoding, solver_name, step, idx, radius, time_limit, child_q),
+            daemon=True,
+        )
+        child.start()
+
+        sent_terminal_msg = False
+
         while True:
-            msg = in_q.get()
-            if msg is None:
+            _drain_control_queue(control_q, pending_cancel_steps)
+
+            if step in pending_cancel_steps:
+                pending_cancel_steps.discard(step)
+                _terminate_process_fast(child)
+                result_q.put(("cancelled", step, None))
+                sent_terminal_msg = True
                 break
 
-            cmd = msg.get("cmd")
-            if cmd == "solve":
-                step = msg["step"]
-                idx = msg["idx"]
-                radius = msg["radius"]
-                cancel_ev = msg.get("cancel_ev", None)
-
-                try:
-                    res = _solve_radius_external_once(
-                        inst=inst,
-                        idx=idx,
-                        encoding=encoding,
-                        solver_name=solver_name,
-                        radius=radius,
-                        time_limit=time_limit,
-                        cancel_ev=cancel_ev,
-                    )
-                    out_q.put(("result", step, res))
-                except Exception:
-                    out_q.put(("error", step, traceback.format_exc()))
-
-            elif cmd == "stop":
+            try:
+                item = child_q.get_nowait()
+                result_q.put(item)
+                sent_terminal_msg = True
                 break
-    finally:
+            except pyqueue.Empty:
+                pass
+            except Exception:
+                pass
+
+            if not child.is_alive():
+                break
+
+            time.sleep(0.0005)
+
         try:
-            if _LOCAL_TMPDIR and os.path.isdir(_LOCAL_TMPDIR):
-                shutil.rmtree(_LOCAL_TMPDIR, ignore_errors=True)
+            child.join(timeout=0.1)
         except Exception:
             pass
-        _LOCAL_TMPDIR = None
+
+        # very important: avoid mislabeling a finished solve as cancelled
+        if not sent_terminal_msg:
+            try:
+                item = child_q.get_nowait()
+                result_q.put(item)
+                sent_terminal_msg = True
+            except pyqueue.Empty:
+                pass
+            except Exception:
+                pass
+
+        if (not sent_terminal_msg) and (not child.is_alive()):
+            result_q.put(("cancelled", step, None))
+
+        try:
+            child_q.close()
+            child_q.join_thread()
+        except Exception:
+            pass
 
 def _safe_put(q, item):
     try:
