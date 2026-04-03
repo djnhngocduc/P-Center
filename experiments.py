@@ -814,7 +814,6 @@ def search_min_radius_hybrid_race(
     cplex_proc = mp.Process(
         target=_cplex_worker_loop,
         args=(inst, cplex_job_q, cplex_ctl_q, cplex_result_q, time_limit),
-        daemon=True,
     )
     cplex_proc.start()
 
@@ -839,7 +838,6 @@ def search_min_radius_hybrid_race(
             sat_proc = mp.Process(
                 target=_external_sat_worker_loop,
                 args=(inst, encoding, solver_name, sat_job_q, sat_ctl_q, sat_result_q, time_limit),
-                daemon=True,
             )
             sat_proc.start()
 
