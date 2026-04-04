@@ -29,8 +29,10 @@ except Exception:
 
 try:
     from docplex.cp.model import CpoModel
+    from docplex.cp.parameters import CpoParameters
 except Exception:
     CpoModel = None
+    CpoParameters = None
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
@@ -2039,7 +2041,7 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, data=None):
 def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     pid = os.getpid()
 
-    if CpoModel is None:
+    if CpoModel is None or CpoParameters is None:
         raise ImportError(
             "Could not import docplex.cp.model.CpoModel. "
             "Install docplex and make sure CP Optimizer is available."
@@ -2060,48 +2062,28 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     cover_rows = data["cover_rows"]
 
     mdl = CpoModel(name=f"pcenter_feas_R_{radius}")
-
-    # binary open-center variables
     x = mdl.binary_var_list(n, name="x")
 
-    # coverage constraints
-    # sort rows by increasing |allowed| first: usually tighter rows first helps propagation a bit
     rows_sorted = sorted(cover_rows, key=lambda t: len(t[1]))
     for u, allowed in rows_sorted:
         mdl.add(mdl.sum(x[j] for j in allowed) >= 1)
 
-    # at most p centers
     total_open = mdl.sum(x)
     mdl.add(total_open <= p)
-
-    # very light search guidance:
-    # among feasible solutions, prefer fewer centers first
-    # this does not invalidate the radius-feasibility test
     mdl.minimize(total_open)
-
-    # search phase on main binary vars
-    # CP Optimizer can use explicit search phases to instantiate variables in that order
     mdl.set_search_phases([mdl.search_phase(x)])
 
-    # parameter tuning for this kind of pure binary feasibility model
-    params = mdl.get_parameters()
+    params = CpoParameters()
     params.LogVerbosity = "Quiet"
     params.TimeLimit = float(time_limit) if (time_limit and time_limit > 0) else None
     params.TimeMode = "ElapsedTime"
-
-    # try a stronger propagation/presolve setup
     params.Presolve = "On"
     params.DefaultInferenceLevel = "Extended"
     params.DynamicProbing = "On"
     params.FailureDirectedSearch = "On"
-
-    # search strategy:
-    # Restart is often a reasonable choice for pure combinatorial feasibility search.
-    # Multi-worker CP is not always better here, so default to 1 for stability/repeatability.
     params.SearchType = "Restart"
     params.RestartFailLimit = 100
     params.RestartGrowthFactor = 1.15
-    params.Workers = 1
     params.RandomSeed = 0
 
     cpu0 = _cpu_self_seconds()
@@ -2910,7 +2892,7 @@ def parse_args():
         "--solvers",
         nargs="+",
         default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex_mip", "cplex_cp"],
-        help="Solvers to use (internal SAT / external SAT / cplex_mip / cpo)",
+        help="Solvers to use (internal SAT / external SAT / cplex_mip / cplex_cp)",
     )
     ap.add_argument(
         "--time-limit",
