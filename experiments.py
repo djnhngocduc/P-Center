@@ -2173,13 +2173,15 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     mdl = CpoModel(name=f"pcenter_feas_R_{radius}")
     x = mdl.binary_var_list(n, name="x")
 
+    # Đưa các row chặt hơn lên trước
     rows_sorted = sorted(cover_rows, key=lambda t: len(t[1]))
     for u, allowed in rows_sorted:
         mdl.add(mdl.sum(x[j] for j in allowed) >= 1)
 
     total_open = mdl.sum(x)
     mdl.add(total_open <= p)
-    mdl.minimize(total_open)
+
+    # Giữ search phase trên biến chính
     mdl.set_search_phases([mdl.search_phase(x)])
 
     params = CpoParameters()
@@ -2189,10 +2191,7 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     params.Presolve = "On"
     params.DefaultInferenceLevel = "Extended"
     params.DynamicProbing = "On"
-    params.FailureDirectedSearch = "On"
-    params.SearchType = "Restart"
-    params.RestartFailLimit = 100
-    params.RestartGrowthFactor = 1.15
+    params.SearchType = "Auto"
     params.RandomSeed = 0
 
     cpu0 = _cpu_self_seconds()
@@ -2230,14 +2229,21 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     except Exception:
         fail_status = ""
 
-    has_solution = False
     centers = []
+    has_solution = False
+
     try:
-        vals = [sol[x[j]] for j in range(n)]
-        centers = [j for j, v in enumerate(vals) if v is not None and float(v) > 0.5]
-        has_solution = True
+        if sol.is_solution():
+            vals = [sol[x[j]] for j in range(n)]
+            centers = [j for j, v in enumerate(vals) if v is not None and float(v) > 0.5]
+            has_solution = True
     except Exception:
-        has_solution = False
+        try:
+            vals = [sol[x[j]] for j in range(n)]
+            centers = [j for j, v in enumerate(vals) if v is not None and float(v) > 0.5]
+            has_solution = True
+        except Exception:
+            has_solution = False
 
     if has_solution or ("feasible" in solve_status) or ("optimal" in solve_status):
         print(
