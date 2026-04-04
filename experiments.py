@@ -2068,32 +2068,39 @@ def _solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
     p = data["p"]
     cover_rows = data["cover_rows"]
 
-    model = gp.Model(f"pcenter_feas_R_{radius}")
-    model.Params.OutputFlag = 0
+    model = None
+    try:
+        model = gp.Model(f"pcenter_feas_R_{radius}")
+        model.Params.OutputFlag = 0
 
-    if time_limit and time_limit > 0:
-        model.Params.TimeLimit = float(time_limit)
+        if time_limit and time_limit > 0:
+            model.Params.TimeLimit = float(time_limit)
 
-    x = model.addVars(n, vtype=GRB.BINARY, name="x")
+        x = model.addVars(n, vtype=GRB.BINARY, name="x")
 
-    for u, allowed in cover_rows:
-        model.addConstr(gp.quicksum(x[j] for j in allowed) >= 1, name=f"cover_{u}")
+        for u, allowed in cover_rows:
+            model.addConstr(
+                gp.quicksum(x[j] for j in allowed) >= 1,
+                name=f"cover_{u}"
+            )
 
-    model.addConstr(gp.quicksum(x[j] for j in range(n)) <= p, name="atmost_p")
+        model.addConstr(
+            gp.quicksum(x[j] for j in range(n)) <= p,
+            name="atmost_p"
+        )
 
-    cpu0 = _cpu_self_seconds()
-    model.optimize()
-    cpu1 = _cpu_self_seconds()
-    cpu_sec = cpu1 - cpu0
+        cpu0 = _cpu_self_seconds()
+        model.optimize()
+        cpu1 = _cpu_self_seconds()
+        cpu_sec = cpu1 - cpu0
 
-    nvars = model.NumVars
-    nclauses = model.NumConstrs
+        nvars = model.NumVars
+        nclauses = model.NumConstrs
+        status = model.Status
+        solcount = int(getattr(model, "SolCount", 0) or 0)
 
-    status = model.Status
-
-    if status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT, GRB.NODE_LIMIT, GRB.ITERATION_LIMIT, GRB.SOLUTION_LIMIT):
-        solcount = getattr(model, "SolCount", 0)
-        if solcount and solcount > 0:
+        # 1) Có nghiệm feasible thì coi là SAT
+        if solcount > 0:
             centers = [j for j in range(n) if x[j].X > 0.5]
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
@@ -2102,29 +2109,43 @@ def _solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
             )
             return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
 
-    if status == GRB.INFEASIBLE:
+        # 2) Chứng minh infeasible
+        if status == GRB.INFEASIBLE:
+            print(
+                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                f"-> UNSAT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+                flush=True
+            )
+            return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+
+        # 3) Dừng do các limit mà chưa có nghiệm
+        if status in (
+            GRB.TIME_LIMIT,
+            GRB.NODE_LIMIT,
+            GRB.ITERATION_LIMIT,
+            GRB.SOLUTION_LIMIT,
+        ):
+            print(
+                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                f"-> TIMEOUT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+                flush=True
+            )
+            return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+
+        # 4) Bị interrupt / các trạng thái còn lại
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> UNSAT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+            f"-> ERROR(GUROBI) cpu={cpu_sec:.6f}s status={status}",
             flush=True
         )
-        return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+        return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
-    if status in (GRB.TIME_LIMIT, GRB.NODE_LIMIT, GRB.ITERATION_LIMIT):
-        print(
-            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> TIMEOUT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
-            flush=True
-        )
-        return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
-
-    print(
-        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-        f"-> ERROR(GUROBI) cpu={cpu_sec:.6f}s status={status}",
-        flush=True
-    )
-    return idx, radius, "error", cpu_sec, nvars, nclauses, None
-
+    finally:
+        if model is not None:
+            try:
+                model.dispose()
+            except Exception:
+                pass
 
 def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     pid = os.getpid()
@@ -2172,7 +2193,6 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     params.SearchType = "Restart"
     params.RestartFailLimit = 100
     params.RestartGrowthFactor = 1.15
-    params.Workers = 1
     params.RandomSeed = 0
 
     cpu0 = _cpu_self_seconds()
@@ -2989,7 +3009,7 @@ def parse_args():
         "--solvers",
         nargs="+",
         default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex_mip", "cplex_cp", "gurobi_mip"],
-        help="Solvers to use (internal SAT / external SAT / cplex_mip / cpo)",
+        help="Solvers to use (internal SAT / external SAT / cplex_mip / cplex_cp / gurobi_mip)",
     )
     ap.add_argument(
         "--time-limit",
