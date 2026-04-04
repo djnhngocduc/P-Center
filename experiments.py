@@ -27,6 +27,11 @@ try:
 except Exception:
     cplex = None
 
+try:
+    from docplex.cp.model import CpoModel
+except Exception:
+    CpoModel = None
+
 _CANCEL_SHARED = None
 _INST_SHARED = None
 INF = 10 ** 12
@@ -415,8 +420,8 @@ def search_min_radius_hybrid_threshold(
     """
     search_t0 = time.perf_counter()
 
-    if solver_name == "cplex":
-        raise ValueError("hybrid_threshold expects a SAT solver in --solvers, not 'cplex'.")
+    if solver_name == "cplex_mip":
+        raise ValueError("hybrid_threshold expects a SAT solver in --solvers, not 'cplex_mip'.")
     if cplex is None:
         raise ImportError("hybrid_threshold needs CPLEX installed.")
 
@@ -786,8 +791,8 @@ def search_min_radius_hybrid_race(
     """
     search_t0 = time.perf_counter()
 
-    if solver_name == "cplex":
-        raise ValueError("hybrid_race expects a SAT solver in --solvers, not 'cplex'.")
+    if solver_name == "cplex_mip":
+        raise ValueError("hybrid_race expects a SAT solver in --solvers, not 'cplex_mip'.")
     if cplex is None:
         raise ImportError("hybrid_race needs CPLEX installed.")
 
@@ -926,7 +931,7 @@ def search_min_radius_hybrid_race(
                         if tag == "result":
                             idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = payload
                             if c_status in ("sat", "unsat"):
-                                winner_backend = "cplex"
+                                winner_backend = "cplex_mip"
                                 winner_result = payload
 
                                 if use_incremental_sat:
@@ -987,7 +992,7 @@ def search_min_radius_hybrid_race(
                 else:
                     hi = idx1 - 1
 
-            elif winner_backend == "cplex":
+            elif winner_backend == "cplex_mip":
                 idx2, R2, c_status, c_cpu, c_nvars, c_nclauses, c_centers = winner_result
                 if c_status == "sat":
                     best_sat_idx = idx2
@@ -2031,6 +2036,105 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     )
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
+def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
+    pid = os.getpid()
+
+    if CpoModel is None:
+        raise ImportError(
+            "Could not import docplex.cp.model.CpoModel. "
+            "Install docplex and make sure CP Optimizer is available."
+        )
+
+    if data is None:
+        data = inst._build_setcover_data(radius)
+
+    if data is None:
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(CPO:no coverage)",
+            flush=True
+        )
+        return idx, radius, "unsat", 0.0, inst.n, 0, None
+
+    n = data["n"]
+    p = data["p"]
+    cover_rows = data["cover_rows"]
+
+    mdl = CpoModel(name=f"pcenter_feas_R_{radius}")
+    x = mdl.binary_var_list(n, name="x")
+
+    for u, allowed in cover_rows:
+        mdl.add(sum(x[j] for j in allowed) >= 1)
+
+    mdl.add(sum(x[j] for j in range(n)) <= p)
+
+    cpu0 = _cpu_self_seconds()
+    try:
+        sol = mdl.solve(TimeLimit=float(time_limit) if (time_limit and time_limit > 0) else None, LogVerbosity="Quiet")
+    except Exception as e:
+        cpu1 = _cpu_self_seconds()
+        cpu_sec = cpu1 - cpu0
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> ERROR(CPO) cpu={cpu_sec:.6f}s err={e}",
+            flush=True
+        )
+        return idx, radius, "error", cpu_sec, n, len(cover_rows) + 1, None
+
+    cpu1 = _cpu_self_seconds()
+    cpu_sec = cpu1 - cpu0
+
+    nvars = n
+    nclauses = len(cover_rows) + 1
+
+    if sol is None:
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> TIMEOUT(CPO) cpu={cpu_sec:.6f}s",
+            flush=True
+        )
+        return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+
+    try:
+        solve_status = str(sol.get_solve_status()).lower()
+    except Exception:
+        solve_status = "unknown"
+
+    try:
+        fail_status = str(sol.get_fail_status()).lower()
+    except Exception:
+        fail_status = ""
+
+    has_solution = False
+    centers = []
+    try:
+        vals = [sol[x[j]] for j in range(n)]
+        centers = [j for j, v in enumerate(vals) if v is not None and float(v) > 0.5]
+        has_solution = len(centers) > 0 or p == 0
+    except Exception:
+        has_solution = False
+
+    if has_solution or ("feasible" in solve_status) or ("optimal" in solve_status):
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> SAT(CPO) cpu={cpu_sec:.6f}s status={solve_status} centers={centers}",
+            flush=True
+        )
+        return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+
+    if ("infeasible" in solve_status) or ("failure" in fail_status) or ("searchcompleted" in fail_status and not has_solution):
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> UNSAT(CPO) cpu={cpu_sec:.6f}s status={solve_status} fail={fail_status}",
+            flush=True
+        )
+        return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+
+    print(
+        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+        f"-> TIMEOUT(CPO) cpu={cpu_sec:.6f}s status={solve_status} fail={fail_status}",
+        flush=True
+    )
+    return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+
+
 def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
     """
     Solve one radius with CPLEX inside a persistent worker process.
@@ -2140,7 +2244,6 @@ def _cplex_solve_child(inst, step, idx, radius, time_limit, out_q):
         out_q.put(("result", step, res))
     except Exception:
         out_q.put(("error", step, traceback.format_exc()))
-
 
 def _external_sat_solve_child(inst, encoding, solver_name, step, idx, radius, time_limit, out_q):
     try:
@@ -2564,16 +2667,24 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     try:
         global _INST_SHARED
 
-        if solver_name == "cplex":
+        if solver_name in ("cplex_mip", "cplex_cp"):
             data = _INST_SHARED._build_setcover_data(radius)
             print(
-                f"[ENCODE-CPLEX] idx={idx} R={radius} "
+                f"[ENCODE-{solver_name.upper()}] idx={idx} R={radius} "
                 f"candidates={0 if data is None else len(data.get('candidates', []))} "
                 f"bound={None if data is None else data.get('p')} "
                 f"rows={0 if data is None else len(data.get('cover_rows', []))}",
                 flush=True
             )
-            return _solve_radius_cplex(
+            if solver_name == "cplex_mip":
+                return _solve_radius_cplex(
+                    inst=_INST_SHARED,
+                    idx=idx,
+                    radius=radius,
+                    time_limit=time_limit,
+                    data=data,
+                )
+            return _solve_radius_cpo(
                 inst=_INST_SHARED,
                 idx=idx,
                 radius=radius,
@@ -2761,8 +2872,8 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex"],
-        help="Solvers to use",
+        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex_mip", "cplex_cp"],
+        help="Solvers to use (internal SAT / external SAT / cplex_mip / cpo)",
     )
     ap.add_argument(
         "--time-limit",
@@ -3040,11 +3151,11 @@ def profile_threshold_incremental_vs_cplex(
                 if sat_wall < cplex_wall - 1e-12:
                     winner = "sat"
                 elif cplex_wall < sat_wall - 1e-12:
-                    winner = "cplex"
+                    winner = "cplex_mip"
             elif sat_status in ("sat", "unsat"):
                 winner = "sat"
             elif cplex_status in ("sat", "unsat"):
-                winner = "cplex"
+                winner = "cplex_mip"
 
             row = {
                 "instance": instance_name,
@@ -3122,7 +3233,7 @@ def profile_threshold_incremental_vs_cplex(
     for k in sorted(grouped.keys(), reverse=True):
         rows_k = grouped[k]
         sat_wins = sum(1 for r in rows_k if r["winner"] == "sat")
-        cplex_wins = sum(1 for r in rows_k if r["winner"] == "cplex")
+        cplex_wins = sum(1 for r in rows_k if r["winner"] == "cplex_mip")
         ties = sum(1 for r in rows_k if r["winner"] == "tie")
         mismatches = sum(int(r["status_mismatch"]) for r in rows_k)
 
@@ -3290,8 +3401,10 @@ def run_experiment(
     threshold_detail_out=None,
     threshold_summary_out=None,
 ):
-    if "cplex" in solvers and search_mode not in ("binary", "threshold_profile", "hybrid_threshold", "hybrid_race"):
+    if "cplex_mip" in solvers and search_mode not in ("binary", "threshold_profile", "hybrid_threshold", "hybrid_race"):
         raise ValueError("CPLEX backend currently supports only binary search, threshold_profile, or hybrid_threshold, or hybrid_race.")
+    if "cplex_cp" in solvers and search_mode not in ("parallel", "binary", "kary"):
+        raise ValueError("CPO backend currently supports only parallel, binary, or kary search.")
     
     results = []
     load_t0 = time.perf_counter()
@@ -3305,7 +3418,7 @@ def run_experiment(
     )
 
     if search_mode == "threshold_profile":
-        sat_solvers = [s for s in solvers if s != "cplex"]
+        sat_solvers = [s for s in solvers if s != "cplex_mip"]
         if len(sat_solvers) != 1:
             raise ValueError(
                 "threshold_profile expects exactly one SAT solver plus CPLEX. "
@@ -3368,24 +3481,24 @@ def run_experiment(
         if len(solvers) != 1:
             raise ValueError(
                 "hybrid_threshold expects exactly one SAT solver in --solvers. "
-                "Do not include cplex here because CPLEX is used internally."
+                "Do not include cplex_mip here because CPLEX is used internally."
             )
-        if solvers[0] == "cplex":
+        if solvers[0] == "cplex_mip":
             raise ValueError(
-                "hybrid_threshold needs a SAT solver in --solvers, not 'cplex'."
+                "hybrid_threshold needs a SAT solver in --solvers, not 'cplex_mip'."
             )
 
     if search_mode == "hybrid_race":
         if len(solvers) != 1:
             raise ValueError(
                 "hybrid_race expects exactly one SAT solver in --solvers. "
-                "Do not include cplex here because CPLEX is used internally."
+                "Do not include cplex_mip here because CPLEX is used internally."
             )
-        if solvers[0] == "cplex":
-            raise ValueError("hybrid_race needs a SAT solver in --solvers, not 'cplex'.")
+        if solvers[0] == "cplex_mip":
+            raise ValueError("hybrid_race needs a SAT solver in --solvers, not 'cplex_mip'.")
 
     for solver_name in solvers:
-        solver_encodings = encodings if solver_name != "cplex" else ["setcover"]
+        solver_encodings = encodings if solver_name not in ("cplex_mip", "cplex_cp") else ["setcover"]
         for encoding in solver_encodings:
             for run_id in range(1):
                 print(
@@ -3465,7 +3578,7 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "cplex": 6}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "cplex_mip": 6, "cplex_cp": 7}
     mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "threshold_profile": 4, "hybrid_threshold": 5, "hybrid_race": 6}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
