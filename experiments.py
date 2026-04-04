@@ -28,6 +28,13 @@ except Exception:
     cplex = None
 
 try:
+    import gurobipy as gp
+    from gurobipy import GRB
+except Exception:
+    gp = None
+    GRB = None
+
+try:
     from docplex.cp.model import CpoModel
     from docplex.cp.parameters import CpoParameters
 except Exception:
@@ -2038,6 +2045,87 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     )
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
+
+def _solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
+    pid = os.getpid()
+
+    if gp is None or GRB is None:
+        raise ImportError(
+            "Could not import gurobipy. Make sure Gurobi is installed and the license is available."
+        )
+
+    if data is None:
+        data = inst._build_setcover_data(radius)
+
+    if data is None:
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(GUROBI:no coverage)",
+            flush=True
+        )
+        return idx, radius, "unsat", 0.0, inst.n, 0, None
+
+    n = data["n"]
+    p = data["p"]
+    cover_rows = data["cover_rows"]
+
+    model = gp.Model(f"pcenter_feas_R_{radius}")
+    model.Params.OutputFlag = 0
+
+    if time_limit and time_limit > 0:
+        model.Params.TimeLimit = float(time_limit)
+
+    x = model.addVars(n, vtype=GRB.BINARY, name="x")
+
+    for u, allowed in cover_rows:
+        model.addConstr(gp.quicksum(x[j] for j in allowed) >= 1, name=f"cover_{u}")
+
+    model.addConstr(gp.quicksum(x[j] for j in range(n)) <= p, name="atmost_p")
+
+    cpu0 = _cpu_self_seconds()
+    model.optimize()
+    cpu1 = _cpu_self_seconds()
+    cpu_sec = cpu1 - cpu0
+
+    nvars = model.NumVars
+    nclauses = model.NumConstrs
+
+    status = model.Status
+
+    if status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT, GRB.NODE_LIMIT, GRB.ITERATION_LIMIT, GRB.SOLUTION_LIMIT):
+        solcount = getattr(model, "SolCount", 0)
+        if solcount and solcount > 0:
+            centers = [j for j in range(n) if x[j].X > 0.5]
+            print(
+                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                f"-> SAT(GUROBI) cpu={cpu_sec:.6f}s status={status} centers={centers}",
+                flush=True
+            )
+            return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+
+    if status == GRB.INFEASIBLE:
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> UNSAT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+            flush=True
+        )
+        return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+
+    if status in (GRB.TIME_LIMIT, GRB.NODE_LIMIT, GRB.ITERATION_LIMIT):
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> TIMEOUT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+            flush=True
+        )
+        return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+
+    print(
+        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+        f"-> ERROR(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+        flush=True
+    )
+    return idx, radius, "error", cpu_sec, nvars, nclauses, None
+
+
 def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     pid = os.getpid()
 
@@ -2084,6 +2172,7 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     params.SearchType = "Restart"
     params.RestartFailLimit = 100
     params.RestartGrowthFactor = 1.15
+    params.Workers = 1
     params.RandomSeed = 0
 
     cpu0 = _cpu_self_seconds()
@@ -2686,7 +2775,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     try:
         global _INST_SHARED
 
-        if solver_name in ("cplex_mip", "cplex_cp"):
+        if solver_name in ("cplex_mip", "cplex_cp", "gurobi_mip"):
             data = _INST_SHARED._build_setcover_data(radius)
             print(
                 f"[ENCODE-{solver_name.upper()}] idx={idx} R={radius} "
@@ -2697,6 +2786,14 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             )
             if solver_name == "cplex_mip":
                 return _solve_radius_cplex(
+                    inst=_INST_SHARED,
+                    idx=idx,
+                    radius=radius,
+                    time_limit=time_limit,
+                    data=data,
+                )
+            if solver_name == "gurobi_mip":
+                return _solve_radius_gurobi(
                     inst=_INST_SHARED,
                     idx=idx,
                     radius=radius,
@@ -2891,8 +2988,8 @@ def parse_args():
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex_mip", "cplex_cp"],
-        help="Solvers to use (internal SAT / external SAT / cplex_mip / cplex_cp)",
+        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex_mip", "cplex_cp", "gurobi_mip"],
+        help="Solvers to use (internal SAT / external SAT / cplex_mip / cpo)",
     )
     ap.add_argument(
         "--time-limit",
@@ -3424,6 +3521,8 @@ def run_experiment(
         raise ValueError("CPLEX backend currently supports only binary search, threshold_profile, or hybrid_threshold, or hybrid_race.")
     if "cplex_cp" in solvers and search_mode not in ("parallel", "binary", "kary"):
         raise ValueError("CPO backend currently supports only parallel, binary, or kary search.")
+    if "gurobi_mip" in solvers and search_mode not in ("parallel", "binary", "kary"):
+        raise ValueError("Gurobi backend currently supports only parallel, binary, or kary search.")
     
     results = []
     load_t0 = time.perf_counter()
@@ -3517,7 +3616,7 @@ def run_experiment(
             raise ValueError("hybrid_race needs a SAT solver in --solvers, not 'cplex_mip'.")
 
     for solver_name in solvers:
-        solver_encodings = encodings if solver_name not in ("cplex_mip", "cplex_cp") else ["setcover"]
+        solver_encodings = encodings if solver_name not in ("cplex_mip", "cplex_cp", "gurobi_mip") else ["setcover"]
         for encoding in solver_encodings:
             for run_id in range(1):
                 print(
@@ -3597,7 +3696,7 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "cplex_mip": 6, "cplex_cp": 7}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "cplex_mip": 6, "cplex_cp": 7, "gurobi_mip": 8}
     mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "threshold_profile": 4, "hybrid_threshold": 5, "hybrid_race": 6}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
