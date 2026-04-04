@@ -2060,16 +2060,53 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     cover_rows = data["cover_rows"]
 
     mdl = CpoModel(name=f"pcenter_feas_R_{radius}")
+
+    # binary open-center variables
     x = mdl.binary_var_list(n, name="x")
 
-    for u, allowed in cover_rows:
-        mdl.add(sum(x[j] for j in allowed) >= 1)
+    # coverage constraints
+    # sort rows by increasing |allowed| first: usually tighter rows first helps propagation a bit
+    rows_sorted = sorted(cover_rows, key=lambda t: len(t[1]))
+    for u, allowed in rows_sorted:
+        mdl.add(mdl.sum(x[j] for j in allowed) >= 1)
 
-    mdl.add(sum(x[j] for j in range(n)) <= p)
+    # at most p centers
+    total_open = mdl.sum(x)
+    mdl.add(total_open <= p)
+
+    # very light search guidance:
+    # among feasible solutions, prefer fewer centers first
+    # this does not invalidate the radius-feasibility test
+    mdl.minimize(total_open)
+
+    # search phase on main binary vars
+    # CP Optimizer can use explicit search phases to instantiate variables in that order
+    mdl.set_search_phases([mdl.search_phase(x)])
+
+    # parameter tuning for this kind of pure binary feasibility model
+    params = mdl.get_parameters()
+    params.LogVerbosity = "Quiet"
+    params.TimeLimit = float(time_limit) if (time_limit and time_limit > 0) else None
+    params.TimeMode = "ElapsedTime"
+
+    # try a stronger propagation/presolve setup
+    params.Presolve = "On"
+    params.DefaultInferenceLevel = "Extended"
+    params.DynamicProbing = "On"
+    params.FailureDirectedSearch = "On"
+
+    # search strategy:
+    # Restart is often a reasonable choice for pure combinatorial feasibility search.
+    # Multi-worker CP is not always better here, so default to 1 for stability/repeatability.
+    params.SearchType = "Restart"
+    params.RestartFailLimit = 100
+    params.RestartGrowthFactor = 1.15
+    params.Workers = 1
+    params.RandomSeed = 0
 
     cpu0 = _cpu_self_seconds()
     try:
-        sol = mdl.solve(TimeLimit=float(time_limit) if (time_limit and time_limit > 0) else None, LogVerbosity="Quiet")
+        sol = mdl.solve(params=params)
     except Exception as e:
         cpu1 = _cpu_self_seconds()
         cpu_sec = cpu1 - cpu0
@@ -2107,7 +2144,7 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     try:
         vals = [sol[x[j]] for j in range(n)]
         centers = [j for j, v in enumerate(vals) if v is not None and float(v) > 0.5]
-        has_solution = len(centers) > 0 or p == 0
+        has_solution = True
     except Exception:
         has_solution = False
 
@@ -2119,7 +2156,7 @@ def _solve_radius_cpo(inst, idx, radius, time_limit, data=None):
         )
         return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
 
-    if ("infeasible" in solve_status) or ("failure" in fail_status) or ("searchcompleted" in fail_status and not has_solution):
+    if ("infeasible" in solve_status) or ("searchcompleted" in fail_status and not has_solution):
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
             f"-> UNSAT(CPO) cpu={cpu_sec:.6f}s status={solve_status} fail={fail_status}",
