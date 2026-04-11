@@ -1961,6 +1961,7 @@ def _solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     model.set_warning_stream(None)
     model.set_error_stream(None)
     model.set_log_stream(None)
+    model.parameters.threads.set(1)
 
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
@@ -2072,6 +2073,7 @@ def _solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
     try:
         model = gp.Model(f"pcenter_feas_R_{radius}")
         model.Params.OutputFlag = 0
+        model.Params.Threads = 1
 
         if time_limit and time_limit > 0:
             model.Params.TimeLimit = float(time_limit)
@@ -2295,6 +2297,7 @@ def _cplex_solve_with_abort(inst, idx, radius, time_limit, cancel_ev=None):
     model.set_warning_stream(None)
     model.set_error_stream(None)
     model.set_log_stream(None)
+    model.parameters.threads.set(1)
 
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
