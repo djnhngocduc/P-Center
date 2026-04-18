@@ -1506,7 +1506,7 @@ def parse_args():
     ap.add_argument(
         "--out",
         type=str,
-        default=os.path.join("results", "results", "results.csv"),
+        default=os.path.join("results", "results.csv"),
         help="CSV output path",
     )
     ap.add_argument(
