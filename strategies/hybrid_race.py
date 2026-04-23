@@ -1,5 +1,6 @@
 import time
 import multiprocessing as mp
+import threading
 import traceback
 import sys
 import itertools
@@ -37,7 +38,15 @@ def _safe_close_conn(conn):
         pass
 
 
-def _terminate_process_fast(proc, *, grace=0.02):
+def _send_msg(conn, obj):
+    try:
+        conn.send(obj)
+        return True
+    except Exception:
+        return False
+
+
+def _terminate_process_fast(proc, *, grace=0.2):
     if proc is None:
         return
     try:
@@ -62,14 +71,6 @@ def _terminate_process_fast(proc, *, grace=0.02):
             proc.join(timeout=grace)
     except Exception:
         pass
-
-
-def _send_job(conn, obj):
-    try:
-        conn.send(obj)
-        return True
-    except Exception:
-        return False
 
 
 def _recv_if_matching(conn, step):
@@ -103,7 +104,16 @@ def _check_mip_backend_available(mip_backend: str):
         raise ValueError(f"Unsupported mip_backend: {mip_backend}")
 
 
-def _solve_radius_sat_once(inst, idx, encoding, solver_name, radius, time_limit):
+def _solve_radius_sat_once(
+    inst,
+    idx,
+    encoding,
+    solver_name,
+    radius,
+    time_limit,
+    cancel_ev=None,
+    current_cancel_ref=None,
+):
     cnf, varmap = inst._encode_cnf(radius, encoding)
 
     if cnf is None:
@@ -118,11 +128,14 @@ def _solve_radius_sat_once(inst, idx, encoding, solver_name, radius, time_limit)
         local_tmpdir = tempfile.mkdtemp(prefix="pcsat_race_", dir=base_tmp)
 
         try:
+            if current_cancel_ref is not None and cancel_ev is not None:
+                current_cancel_ref["fn"] = cancel_ev.set
+
             status, cpu_sec, model = run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
-                cancel_ev=None,
+                cancel_ev=cancel_ev,
                 tmpdir=local_tmpdir,
             )
 
@@ -143,19 +156,41 @@ def _solve_radius_sat_once(inst, idx, encoding, solver_name, radius, time_limit)
             return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
 
         finally:
+            if current_cancel_ref is not None:
+                current_cancel_ref["fn"] = None
             try:
                 shutil.rmtree(local_tmpdir, ignore_errors=True)
             except Exception:
                 pass
 
-    with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
+    # Internal PySAT solver
+    solver = Solver(name=solver_name, bootstrap_with=cnf.clauses)
+    try:
+        if cancel_ev is not None and hasattr(solver, "interrupt"):
+            if current_cancel_ref is not None:
+                current_cancel_ref["fn"] = solver.interrupt
+
+            def _watch_cancel():
+                cancel_ev.wait()
+                try:
+                    solver.interrupt()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_watch_cancel, daemon=True).start()
+
         cpu0 = cpu_self_seconds()
-        sat = solver.solve()
+        try:
+            sat = solver.solve_limited(expect_interrupt=True)
+        except NotImplementedError:
+            sat = solver.solve()
         cpu1 = cpu_self_seconds()
 
         cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
 
         if sat is None:
+            if cancel_ev is not None and cancel_ev.is_set():
+                return idx, radius, "cancelled", cpu_sec, nvars, nclauses, None
             return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
 
         if not sat:
@@ -172,9 +207,55 @@ def _solve_radius_sat_once(inst, idx, encoding, solver_name, radius, time_limit)
         centers = sorted(chosen)
         return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
 
+    finally:
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = None
+        try:
+            if hasattr(solver, "clear_interrupt"):
+                solver.clear_interrupt()
+        except Exception:
+            pass
+        try:
+            solver.delete()
+        except Exception:
+            pass
 
-def _sat_worker_loop(inst, encoding, solver_name, job_recv, result_send, time_limit):
-    while True:
+
+def _sat_worker_loop(inst, encoding, solver_name, job_recv, ctl_recv, result_send, time_limit):
+    current_cancel_ref = {"fn": None}
+    stop_flag = {"stop": False}
+
+    def _ctl_loop():
+        while True:
+            try:
+                msg = ctl_recv.recv()
+            except Exception:
+                return
+            if msg is None:
+                return
+
+            cmd = msg.get("cmd")
+            if cmd == "stop":
+                stop_flag["stop"] = True
+                fn = current_cancel_ref["fn"]
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                return
+
+            if cmd == "cancel":
+                fn = current_cancel_ref["fn"]
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
+    threading.Thread(target=_ctl_loop, daemon=True).start()
+
+    while not stop_flag["stop"]:
         try:
             msg = job_recv.recv()
         except EOFError:
@@ -190,6 +271,8 @@ def _sat_worker_loop(inst, encoding, solver_name, job_recv, result_send, time_li
         step = msg["step"]
         idx = msg["idx"]
         radius = msg["radius"]
+
+        cancel_ev = threading.Event()
 
         try:
             res = _solve_radius_sat_once(
@@ -199,101 +282,147 @@ def _sat_worker_loop(inst, encoding, solver_name, job_recv, result_send, time_li
                 solver_name=solver_name,
                 radius=radius,
                 time_limit=time_limit,
+                cancel_ev=cancel_ev,
+                current_cancel_ref=current_cancel_ref,
             )
             result_send.send(("result", step, res))
         except Exception:
             result_send.send(("error", step, traceback.format_exc()))
+        finally:
+            current_cancel_ref["fn"] = None
 
     _safe_close_conn(job_recv)
+    _safe_close_conn(ctl_recv)
     _safe_close_conn(result_send)
 
 
-def _mip_worker_loop(inst, mip_backend, job_recv, result_send, time_limit):
-    while True:
-        try:
-            msg = job_recv.recv()
-        except EOFError:
-            break
-        except Exception:
-            break
+def _mip_worker_loop(inst, mip_backend, job_recv, ctl_recv, result_send, time_limit):
+    current_cancel_ref = {"fn": None}
+    stop_flag = {"stop": False}
+    env = None
 
-        if msg is None:
-            break
-        if not isinstance(msg, dict) or msg.get("cmd") != "solve":
-            continue
+    def _ctl_loop():
+        while True:
+            try:
+                msg = ctl_recv.recv()
+            except Exception:
+                return
+            if msg is None:
+                return
 
-        step = msg["step"]
-        idx = msg["idx"]
-        radius = msg["radius"]
+            cmd = msg.get("cmd")
+            if cmd == "stop":
+                stop_flag["stop"] = True
+                fn = current_cancel_ref["fn"]
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                return
 
-        try:
-            if mip_backend == "cplex_mip":
-                res = solve_radius_cplex(
-                    inst=inst,
-                    idx=idx,
-                    radius=radius,
-                    time_limit=time_limit,
-                    data=None,
-                )
-            elif mip_backend == "gurobi_mip":
-                res = solve_radius_gurobi(
-                    inst=inst,
-                    idx=idx,
-                    radius=radius,
-                    time_limit=time_limit,
-                    data=None,
-                )
-            else:
-                raise ValueError(f"Unsupported mip_backend: {mip_backend}")
+            if cmd == "cancel":
+                fn = current_cancel_ref["fn"]
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
 
-            result_send.send(("result", step, res))
-        except Exception:
-            result_send.send(("error", step, traceback.format_exc()))
+    threading.Thread(target=_ctl_loop, daemon=True).start()
 
-    _safe_close_conn(job_recv)
-    _safe_close_conn(result_send)
+    try:
+        if mip_backend == "gurobi_mip":
+            env = gp.Env(empty=True)
+            env.start()
+
+        while not stop_flag["stop"]:
+            try:
+                msg = job_recv.recv()
+            except EOFError:
+                break
+            except Exception:
+                break
+
+            if msg is None:
+                break
+            if not isinstance(msg, dict) or msg.get("cmd") != "solve":
+                continue
+
+            step = msg["step"]
+            idx = msg["idx"]
+            radius = msg["radius"]
+
+            try:
+                if mip_backend == "cplex_mip":
+                    res = solve_radius_cplex(
+                        inst=inst,
+                        idx=idx,
+                        radius=radius,
+                        time_limit=time_limit,
+                        data=None,
+                        current_cancel_ref=current_cancel_ref,
+                    )
+                elif mip_backend == "gurobi_mip":
+                    res = solve_radius_gurobi(
+                        inst=inst,
+                        idx=idx,
+                        radius=radius,
+                        time_limit=time_limit,
+                        data=None,
+                        env=env,
+                        current_cancel_ref=current_cancel_ref,
+                    )
+                else:
+                    raise ValueError(f"Unsupported mip_backend: {mip_backend}")
+
+                result_send.send(("result", step, res))
+            except Exception:
+                result_send.send(("error", step, traceback.format_exc()))
+            finally:
+                current_cancel_ref["fn"] = None
+
+    finally:
+        if env is not None:
+            try:
+                env.dispose()
+            except Exception:
+                pass
+        _safe_close_conn(job_recv)
+        _safe_close_conn(ctl_recv)
+        _safe_close_conn(result_send)
 
 
 def _spawn_sat_worker(inst, encoding, solver_name, time_limit):
     job_recv, job_send = mp.Pipe(duplex=False)
+    ctl_recv, ctl_send = mp.Pipe(duplex=False)
     result_recv, result_send = mp.Pipe(duplex=False)
     proc = mp.Process(
         target=_sat_worker_loop,
-        args=(inst, encoding, solver_name, job_recv, result_send, time_limit),
+        args=(inst, encoding, solver_name, job_recv, ctl_recv, result_send, time_limit),
         daemon=True,
     )
     proc.start()
     _safe_close_conn(job_recv)
+    _safe_close_conn(ctl_recv)
     _safe_close_conn(result_send)
-    return proc, job_send, result_recv
-
-
-def _restart_sat_worker(inst, encoding, solver_name, time_limit, proc, job_send, result_recv):
-    _terminate_process_fast(proc)
-    _safe_close_conn(job_send)
-    _safe_close_conn(result_recv)
-    return _spawn_sat_worker(inst, encoding, solver_name, time_limit)
+    return proc, job_send, ctl_send, result_recv
 
 
 def _spawn_mip_worker(inst, mip_backend, time_limit):
     job_recv, job_send = mp.Pipe(duplex=False)
+    ctl_recv, ctl_send = mp.Pipe(duplex=False)
     result_recv, result_send = mp.Pipe(duplex=False)
     proc = mp.Process(
         target=_mip_worker_loop,
-        args=(inst, mip_backend, job_recv, result_send, time_limit),
+        args=(inst, mip_backend, job_recv, ctl_recv, result_send, time_limit),
         daemon=True,
     )
     proc.start()
     _safe_close_conn(job_recv)
+    _safe_close_conn(ctl_recv)
     _safe_close_conn(result_send)
-    return proc, job_send, result_recv
-
-
-def _restart_mip_worker(inst, mip_backend, time_limit, proc, job_send, result_recv):
-    _terminate_process_fast(proc)
-    _safe_close_conn(job_send)
-    _safe_close_conn(result_recv)
-    return _spawn_mip_worker(inst, mip_backend, time_limit)
+    return proc, job_send, ctl_send, result_recv
 
 
 def search_min_radius_hybrid_race(
@@ -307,8 +436,13 @@ def search_min_radius_hybrid_race(
     seed_idx=None,
     mgr=None,
     cancel_dict=None,
+    verbose=True,
 ):
     search_t0 = time.perf_counter()
+
+    def _log(*args, **kwargs):
+        if verbose:
+            print(*args, **kwargs)
 
     if solver_name == mip_backend:
         raise ValueError(
@@ -333,40 +467,41 @@ def search_min_radius_hybrid_race(
 
     step_counter = itertools.count(1)
 
-    sat_proc, sat_job_send, sat_result_recv = _spawn_sat_worker(inst, encoding, solver_name, time_limit)
-    mip_proc, mip_job_send, mip_result_recv = _spawn_mip_worker(inst, mip_backend, time_limit)
+    sat_proc, sat_job_send, sat_ctl_send, sat_result_recv = _spawn_sat_worker(
+        inst, encoding, solver_name, time_limit
+    )
+    mip_proc, mip_job_send, mip_ctl_send, mip_result_recv = _spawn_mip_worker(
+        inst, mip_backend, time_limit
+    )
 
     try:
-        print(
+        _log(
             f"[HYBRID-RACE-INIT] encoding={encoding} solver={solver_name} "
             f"mip_backend={mip_backend} "
-            f"sat_mode=per_radius_worker mip_mode=per_radius_worker "
+            f"sat_mode=worker+control mip_mode=worker+control "
             f"p={inst.p} lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={len(radii)}",
             flush=True,
         )
 
         while lo <= hi:
-            if sat_proc is None or (not sat_proc.is_alive()):
-                sat_proc, sat_job_send, sat_result_recv = _spawn_sat_worker(inst, encoding, solver_name, time_limit)
-
-            if mip_proc is None or (not mip_proc.is_alive()):
-                mip_proc, mip_job_send, mip_result_recv = _spawn_mip_worker(inst, mip_backend, time_limit)
-
             mid = (lo + hi) // 2
             R = radii[mid]
             step = next(step_counter)
 
-            print(
+            _log(
                 f"[HYBRID-RACE-STEP] step={step} lo={lo} hi={hi} mid={mid} R={R} "
                 f"mip_backend={mip_backend}",
                 flush=True,
             )
 
-            _send_job(sat_job_send, {"cmd": "solve", "step": step, "idx": mid, "radius": R})
-            _send_job(mip_job_send, {"cmd": "solve", "step": step, "idx": mid, "radius": R})
+            _send_msg(sat_job_send, {"cmd": "solve", "step": step, "idx": mid, "radius": R})
+            _send_msg(mip_job_send, {"cmd": "solve", "step": step, "idx": mid, "radius": R})
 
             winner_backend = None
             winner_result = None
+
+            sat_seen = None
+            mip_seen = None
 
             while True:
                 ready = wait([sat_result_recv, mip_result_recv], timeout=0.01)
@@ -382,45 +517,46 @@ def search_min_radius_hybrid_race(
 
                     if conn is sat_result_recv:
                         if tag == "result":
+                            sat_seen = payload
                             idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = payload
                             if s_status in ("sat", "unsat"):
                                 winner_backend = "sat"
                                 winner_result = payload
-
-                                mip_proc, mip_job_send, mip_result_recv = _restart_mip_worker(
-                                    inst, mip_backend, time_limit, mip_proc, mip_job_send, mip_result_recv
-                                )
-
-                                print(
+                                _send_msg(mip_ctl_send, {"cmd": "cancel", "step": step})
+                                _log(
                                     f"[HYBRID-RACE-WIN] step={step} idx={idx1} R={R1} "
                                     f"winner=SAT status={s_status} cpu={s_cpu:.6f}s",
                                     flush=True,
                                 )
                                 break
                         elif tag == "error":
+                            sat_seen = ("error", payload)
                             print(f"[HYBRID-RACE-SAT-ERROR]\n{payload}", file=sys.stderr, flush=True)
 
                     else:
                         if tag == "result":
+                            mip_seen = payload
                             idx2, R2, m_status, m_cpu, m_nvars, m_nclauses, m_centers = payload
                             if m_status in ("sat", "unsat"):
                                 winner_backend = mip_backend
                                 winner_result = payload
-
-                                sat_proc, sat_job_send, sat_result_recv = _restart_sat_worker(
-                                    inst, encoding, solver_name, time_limit, sat_proc, sat_job_send, sat_result_recv
-                                )
-
-                                print(
+                                _send_msg(sat_ctl_send, {"cmd": "cancel", "step": step})
+                                _log(
                                     f"[HYBRID-RACE-WIN] step={step} idx={idx2} R={R2} "
                                     f"winner={mip_backend} status={m_status} cpu={m_cpu:.6f}s",
                                     flush=True,
                                 )
                                 break
                         elif tag == "error":
+                            mip_seen = ("error", payload)
                             print(f"[HYBRID-RACE-MIP-ERROR]\n{payload}", file=sys.stderr, flush=True)
 
                 if winner_backend is not None:
+                    break
+
+                sat_done = sat_seen is not None
+                mip_done = mip_seen is not None
+                if sat_done and mip_done:
                     break
 
             if winner_backend == "sat":
@@ -448,25 +584,30 @@ def search_min_radius_hybrid_race(
                     hi = idx2 - 1
 
             else:
-                if best_sat_idx is not None:
-                    break
                 search_elapsed = time.perf_counter() - search_t0
                 return "error", None, None, None, None, None, search_elapsed
 
     finally:
-        _send_job(sat_job_send, None)
-        if sat_proc is not None:
-            sat_proc.join(timeout=0.05)
-            _terminate_process_fast(sat_proc)
+        _send_msg(sat_ctl_send, {"cmd": "stop"})
+        _send_msg(sat_job_send, None)
 
-        _send_job(mip_job_send, None)
+        _send_msg(mip_ctl_send, {"cmd": "stop"})
+        _send_msg(mip_job_send, None)
+
+        if sat_proc is not None:
+            sat_proc.join(timeout=0.2)
+            _terminate_process_fast(sat_proc, grace=0.2)
+
         if mip_proc is not None:
-            mip_proc.join(timeout=0.05)
-            _terminate_process_fast(mip_proc)
+            mip_proc.join(timeout=0.2)
+            _terminate_process_fast(mip_proc, grace=0.2)
 
         _safe_close_conn(sat_job_send)
+        _safe_close_conn(sat_ctl_send)
         _safe_close_conn(sat_result_recv)
+
         _safe_close_conn(mip_job_send)
+        _safe_close_conn(mip_ctl_send)
         _safe_close_conn(mip_result_recv)
 
     if best_sat_idx is None:

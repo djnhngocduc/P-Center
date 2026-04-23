@@ -195,7 +195,7 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
     return status, cpu_time, (model_lits if status == "sat" else None)
 
 
-def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
+def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_ref=None):
     pid = os.getpid()
 
     if cplex is None:
@@ -220,6 +220,8 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     cover_rows = data["cover_rows"]
 
     model = cplex.Cplex()
+    aborter = None
+
     model.set_results_stream(None)
     model.set_warning_stream(None)
     model.set_error_stream(None)
@@ -228,6 +230,17 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
 
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
+
+    # Soft cancel hook for CPLEX
+    try:
+        aborter = cplex.Aborter()
+        model.use_aborter(aborter)
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = aborter.abort
+    except Exception:
+        aborter = None
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = None
 
     names = [f"x_{j}" for j in range(n)]
     model.variables.add(
@@ -258,10 +271,10 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     cpu1 = cpu_self_seconds()
     cpu_sec = cpu1 - cpu0
 
-    status_code = model.solution.get_status()
     nvars = model.variables.get_num()
     nclauses = model.linear_constraints.get_num()
 
+    status_code = model.solution.get_status()
     try:
         status_name = model.solution.get_status_string(status_code)
     except Exception:
@@ -275,6 +288,12 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
         primal_feasible = model.solution.is_primal_feasible()
     except Exception:
         primal_feasible = False
+
+    try:
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = None
+    except Exception:
+        pass
 
     if primal_feasible or ("optimal" in status_name) or ("feasible" in status_name and "infeasible" not in status_name):
         vals = model.solution.get_values()
@@ -294,7 +313,15 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
         )
         return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
 
-    if ("time limit" in status_name) or ("abort" in status_name) or ("limit" in status_name):
+    if ("abort" in status_name) or ("interrupted" in status_name):
+        print(
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+            f"-> CANCELLED(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+            flush=True
+        )
+        return idx, radius, "cancelled", cpu_sec, nvars, nclauses, None
+
+    if ("time limit" in status_name) or ("limit" in status_name):
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
             f"-> TIMEOUT(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
@@ -310,7 +337,7 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None):
     return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
 
-def solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
+def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, current_cancel_ref=None):
     pid = os.getpid()
 
     if gp is None or GRB is None:
@@ -334,7 +361,16 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
 
     model = None
     try:
-        model = gp.Model(f"pcenter_feas_R_{radius}")
+        cpu0 = cpu_self_seconds()
+
+        if env is None:
+            model = gp.Model(f"pcenter_feas_R_{radius}")
+        else:
+            model = gp.Model(f"pcenter_feas_R_{radius}", env=env)
+
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = model.terminate
+
         model.Params.OutputFlag = 0
         model.Params.Threads = 1
 
@@ -354,8 +390,8 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
             name="atmost_p"
         )
 
-        cpu0 = cpu_self_seconds()
         model.optimize()
+
         cpu1 = cpu_self_seconds()
         cpu_sec = cpu1 - cpu0
 
@@ -363,6 +399,9 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
         nclauses = model.NumConstrs
         status = model.Status
         solcount = int(getattr(model, "SolCount", 0) or 0)
+
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = None
 
         if solcount > 0:
             centers = [j for j in range(n) if x[j].X > 0.5]
@@ -394,6 +433,14 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
             )
             return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
 
+        if status == GRB.INTERRUPTED:
+            print(
+                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
+                f"-> CANCELLED(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+                flush=True
+            )
+            return idx, radius, "cancelled", cpu_sec, nvars, nclauses, None
+
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
             f"-> ERROR(GUROBI) cpu={cpu_sec:.6f}s status={status}",
@@ -402,12 +449,13 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None):
         return idx, radius, "error", cpu_sec, nvars, nclauses, None
 
     finally:
+        if current_cancel_ref is not None:
+            current_cancel_ref["fn"] = None
         if model is not None:
             try:
                 model.dispose()
             except Exception:
                 pass
-
 
 def solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     pid = os.getpid()
