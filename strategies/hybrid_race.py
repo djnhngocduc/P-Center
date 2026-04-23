@@ -293,28 +293,53 @@ class _PersistentIncrementalSATWorker:
         self._cancelled_steps = set()
         self._stopped = False
 
+        self._idle_ev = threading.Event()
+        self._idle_ev.set()
+
+        self._stopped_ev = threading.Event()
+
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
 
     def close(self):
         with self._lock:
             self._stopped = True
+            cur = self._current_step
+            if cur is not None:
+                self._cancelled_steps.add(cur)
             try:
                 self.solver.interrupt()
             except Exception:
                 pass
+
+        deadline = time.perf_counter() + 1.0
+        while time.perf_counter() < deadline:
+            if self._idle_ev.wait(timeout=0.01):
+                break
+
         try:
             self.job_q.put(None)
         except Exception:
             pass
+
         try:
-            self._thread.join(timeout=0.05)
+            self._thread.join(timeout=1.0)
         except Exception:
             pass
-        try:
-            self.solver.delete()
-        except Exception:
-            pass
+
+        if self._thread.is_alive():
+            print(
+                "[HYBRID-RACE-WARN] incremental SAT worker thread still alive during close; "
+                "skip solver.delete() to avoid native crash.",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            try:
+                self.solver.delete()
+            except Exception:
+                pass
+
         _safe_close_conn(self.result_send)
         _safe_close_conn(self.result_recv)
 
@@ -338,8 +363,11 @@ class _PersistentIncrementalSATWorker:
 
             step, idx, radius = msg
 
+            self._idle_ev.clear()
+
             with self._lock:
                 if self._stopped:
+                    self._idle_ev.set()
                     break
                 self._current_step = step
 
@@ -414,6 +442,9 @@ class _PersistentIncrementalSATWorker:
                         pass
                 with self._lock:
                     self._current_step = None
+                self._idle_ev.set()
+
+        self._stopped_ev.set()
 
 
 # -------------------------------
@@ -627,6 +658,7 @@ def search_min_radius_hybrid_race(
 
                                 if use_incremental_sat:
                                     sat_worker.cancel(step)
+                                    _ = sat_conn.poll(0.001)
                                 else:
                                     _safe_put(sat_ctl_q, {"cmd": "cancel", "step": step})
 
