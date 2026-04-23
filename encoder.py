@@ -11,9 +11,6 @@ from pysat.pb import EncType as PBEncType
 from pypblib import pblib
 from pypblib.pblib import PBConfig, Pb2cnf
 
-# from reduction import compute_reduction
-# from sb import automorphism_symmetry_breaking
-
 _PYSAT_CNF_LOCK = RLock()
 DEBUG_REDUCTION = False
 
