@@ -17,8 +17,11 @@ from utils.instances import (
     load_instance,
 )
 
-from strategies.search import (
+from strategies.incremental import (
     search_min_radius_incremental,
+)
+
+from strategies.search import (
     search_min_radius_parallel,
     search_min_radius_binary, 
     search_min_radius_kary,

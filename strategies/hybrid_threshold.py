@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 import traceback
 import sys
 from solvers.backend import EXTERNAL_SOLVERS, cpu_self_seconds, solve_radius_cplex, solve_radius_gurobi
-from strategies.search import remaining_iters_from_bounds
+from utils.threshold import remaining_iters_from_bounds
 from utils.worker import _solve_radius_worker_proc, _pool_initializer
 from pysat.solvers import Solver
 

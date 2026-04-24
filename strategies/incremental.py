@@ -1,0 +1,164 @@
+import time
+import threading
+
+from pysat.solvers import Solver
+
+from solvers.backend import EXTERNAL_SOLVERS, cpu_self_seconds
+
+def search_min_radius_incremental(
+    inst,
+    encoding,
+    solver_name,
+    time_limit,
+    *,
+    radii_workers,
+    seed_idx=None,
+    mgr=None,
+    cancel_dict=None
+):
+    search_t0 = time.perf_counter()
+
+    if solver_name in EXTERNAL_SOLVERS:
+        raise ValueError(
+            f"Incremental mode does not support external solver '{solver_name}'. "
+            f"Use an internal PySAT solver such as glucose4/maplecm/maplechrono."
+        )
+
+    base_cnf, info = inst._build_incremental_base_cnf(encoding=encoding)
+    radii = info["radii"]
+    y_vars = info["y"]
+
+    nR = len(radii)
+    if nR == 0:
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
+
+    lo = 0
+    hi = nR - 1
+
+    best_sat_idx = None
+    best_centers = None
+    best_sat_cpu = None
+
+    next_var = base_cnf.nv + 1
+    tested = {}
+
+    print(
+        f"[INC-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
+        f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR} "
+        f"base_clauses={len(base_cnf.clauses)} base_vars={base_cnf.nv}",
+        flush=True
+    )
+
+    with Solver(name=solver_name, bootstrap_with=base_cnf.clauses) as solver:
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            R = radii[mid]
+
+            if mid not in tested:
+                alpha = next_var
+                next_var += 1
+                tested[mid] = alpha
+
+                step_clauses = inst._build_incremental_guarded_clauses(
+                    radius=R,
+                    selector_lit=alpha,
+                )
+                for cl in step_clauses:
+                    solver.add_clause(cl)
+
+                print(
+                    f"[INC-ADD] idx={mid} R={R} selector={alpha} "
+                    f"added_clauses={len(step_clauses)}",
+                    flush=True
+                )
+            else:
+                alpha = tested[mid]
+
+            print(
+                f"[INC-STEP] lo={lo} hi={hi} mid={mid} R={R}",
+                flush=True
+            )
+
+            timer = None
+            cpu0 = None
+            cpu1 = None
+            try:
+                if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
+                    timer = threading.Timer(time_limit, solver.interrupt)
+                    timer.start()
+                    cpu0 = cpu_self_seconds()
+                    try:
+                        sat = solver.solve_limited(
+                            assumptions=[alpha],
+                            expect_interrupt=True
+                        )
+                    except NotImplementedError:
+                        sat = solver.solve(assumptions=[alpha])
+                    cpu1 = cpu_self_seconds()
+                else:
+                    cpu0 = cpu_self_seconds()
+                    sat = solver.solve(assumptions=[alpha])
+                    cpu1 = cpu_self_seconds()
+            finally:
+                if timer:
+                    timer.cancel()
+
+            cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
+
+            if sat is None:
+                print(
+                    f"[INC-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
+                    flush=True
+                )
+                search_elapsed = time.perf_counter() - search_t0
+                return "timeout", None, next_var - 1, None, None, cpu_sec, search_elapsed
+
+            if sat:
+                model = solver.get_model() or []
+                model_set = set(model)
+                centers = sorted([j for j, v in enumerate(y_vars) if v in model_set])
+
+                best_sat_idx = mid
+                best_centers = centers
+                best_sat_cpu = cpu_sec
+
+                print(
+                    f"[INC-DONE] idx={mid} R={R} status=sat cpu={cpu_sec:.6f}s centers={centers}",
+                    flush=True
+                )
+
+                lo = mid + 1
+            else:
+                print(
+                    f"[INC-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
+                    flush=True
+                )
+
+                hi = mid - 1
+
+    if best_sat_idx is None:
+        print("[INC-RESULT] infeasible (no SAT found)", flush=True)
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, next_var - 1, None, None, None, search_elapsed
+
+    best_radius = radii[best_sat_idx]
+    nvars = next_var - 1
+    nclauses = len(base_cnf.clauses) + (len(tested) * inst.n)
+
+    print(
+        f"[INC-RESULT] status=OK best_idx={best_sat_idx} "
+        f"best_R={best_radius} cpu={best_sat_cpu}",
+        flush=True
+    )
+
+    search_elapsed = time.perf_counter() - search_t0
+    return (
+        "OK",
+        best_radius,
+        nvars,
+        nclauses,
+        best_centers,
+        best_sat_cpu,
+        search_elapsed,
+    )

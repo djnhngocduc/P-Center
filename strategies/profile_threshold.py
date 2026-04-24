@@ -4,7 +4,7 @@ import json
 from collections import defaultdict
 import statistics as _stats
 from solvers.backend import EXTERNAL_SOLVERS, cpu_self_seconds, solve_radius_gurobi, solve_radius_cplex
-from strategies.search import remaining_iters_from_bounds, solver_wall_cost
+from utils.threshold import remaining_iters_from_bounds, solver_wall_cost
 from pysat.solvers import Solver
 from utils.io import write_csv_rows
 

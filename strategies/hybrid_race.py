@@ -585,7 +585,7 @@ def search_min_radius_hybrid_race(
 
             else:
                 search_elapsed = time.perf_counter() - search_t0
-                return "error", None, None, None, None, None, search_elapsed
+                return "timeout", None, None, None, None, None, search_elapsed
 
     finally:
         _send_msg(sat_ctl_send, {"cmd": "stop"})
