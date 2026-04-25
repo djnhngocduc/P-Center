@@ -21,11 +21,11 @@ PYSAT_MAXSAT_SOLVERS = {
 
 EXTERNAL_MAXSAT_SOLVERS = {
     "maxcdcl": (
-        os.path.join(BASE_DIR, "solvers", "MaxCDCL", "build", "maxcdcl"),
+        os.path.join(BASE_DIR, "solvers", "MaxCDCL", "core", "maxcdcl_release"),
         []
     ),
     "openwbo": (
-        os.path.join(BASE_DIR, "solvers", "open-wbo", "open-wbo"),
+        os.path.join(BASE_DIR, "solvers", "Open-WBO", "open-wbo_release"),
         []
     ),
 }
