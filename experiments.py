@@ -17,9 +17,8 @@ from utils.instances import (
     load_instance,
 )
 
-from strategies.incremental import (
-    search_min_radius_incremental,
-)
+from strategies.incremental import search_min_radius_incremental
+from strategies.maxsat import search_min_radius_maxsat
 
 from strategies.search import (
     search_min_radius_parallel,
@@ -57,8 +56,8 @@ def parse_args():
         "--search-mode",
         type=str,
         default="parallel",
-        choices=["parallel", "binary", "kary", "incremental", "threshold_profile", "hybrid_threshold", "hybrid_race"],
-        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile, or hybrid_threshold, or hybrid_race",
+        choices=["parallel", "binary", "kary", "incremental", "threshold_profile", "hybrid_threshold", "hybrid_race", "maxsat"],
+        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile, or hybrid_threshold, or hybrid_race, or maxsat",
     )
     ap.add_argument(
         "--mip-backend",
@@ -217,6 +216,18 @@ def run_experiment(
                 "Use --mip-backend to choose cplex_mip or gurobi_mip."
             )
 
+    if search_mode == "maxsat":
+        if len(encodings) != 1 or encodings[0] not in ("maxsat_setcover", "maxsat_cover"):
+            raise ValueError(
+                "maxsat mode expects exactly one encoding: --encodings maxsat_setcover"
+            )
+
+        for s in solvers:
+            if s not in ("rc2", "maxcdcl", "openwbo"):
+                raise ValueError(
+                    "maxsat mode supports only --solvers rc2, maxcdcl, openwbo"
+                )
+
     for solver_name in solvers:
         solver_encodings = encodings if solver_name not in ("cplex_mip", "cplex_cp", "gurobi_mip") else ["setcover"]
         for encoding in solver_encodings:
@@ -238,6 +249,8 @@ def run_experiment(
                     search_fn = search_min_radius_hybrid_threshold
                 elif search_mode == "hybrid_race":
                     search_fn = search_min_radius_hybrid_race
+                elif search_mode == "maxsat":
+                    search_fn = search_min_radius_maxsat
                 else:
                     raise ValueError(f"Unknown search_mode: {search_mode}")
 
@@ -301,8 +314,8 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "cplex_mip": 6, "cplex_cp": 7, "gurobi_mip": 8}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "threshold_profile": 4, "hybrid_threshold": 5, "hybrid_race": 6}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "maxcdcl": 7, "openwbo": 8, "cplex_mip": 9, "cplex_cp": 10, "gurobi_mip": 11}
+    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "maxsat": 4, "threshold_profile": 5, "hybrid_threshold": 6, "hybrid_race": 7}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):

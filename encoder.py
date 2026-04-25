@@ -1,7 +1,7 @@
 import math
 from typing import List, Tuple
 from threading import RLock
-from pysat.formula import CNF
+from pysat.formula import CNF, WCNF
 from pysat.card import CardEnc
 from pysat.card import EncType as CardEncType
 
@@ -60,54 +60,23 @@ class PCenterSAT:
     def _encode_cnf(self, radius: float, encoding: str):
         cnf = CNF()
 
-        # Nc, Nd, enabled_centers, demands, at_least_pairs = compute_reduction(self.dist, self.n, radius)
-
-        # cnf_extra = [[self._y(a), self._y(b)] for (a, b) in sorted(at_least_pairs)]
-
-        # for clause in cnf_extra:
-        #     cnf.append(clause)
-
-        # for c in Nc:
-        #     cnf.append([self._y(c)])
-
-        # for d in Nd:
-        #     cnf.append([-self._y(d)])
-
-        # Npp = (enabled_centers - Nc) - Nd
-        # candidates = sorted(list(Npp))
-
-        # covered = [False] * self.n
-        # if Nc:
-        #     # only check u in demands
-        #     for c in Nc:
-        #         row = self.dist[c]
-        #         for u in demands:
-        #             if not covered[u] and row[u] <= radius + 1e-12:
-        #                 covered[u] = True
-        
-        # active_demands = [u for u in demands if not covered[u]]
         active_demands = list(range(self.n))
         candidates = list(range(self.n))
 
-        # ---- demand coverage clauses using candidates list (avoid set scans)
+        self._prepare_incremental_cover_order()
+
         for u in active_demands:
             allowed = []
-            # scan candidates once
-            for c in candidates:
-                if self.dist[c][u] <= radius + 1e-12:
+            for dcu, c in self._incremental_cover_order[u]:
+                if dcu <= radius + 1e-12:
                     allowed.append(self.y_lit_all[c])
+                else:
+                    break
             if not allowed:
                 return None, {}
             cnf.append(allowed)
 
-        # bound = self.p - len(Nc)      
         bound = self.p
-        # if bound < 0:
-        #     if DEBUG_REDUCTION:
-        #         print(f"[ENCODE-FAIL] radius={radius}: bound {bound} < 0 (p={self.p}, |Nc|={len(Nc)})")
-        #     return None, {}
-        
-        # automorphism_symmetry_breaking(self, cnf, radius, candidates, active_demands, mode="chain")
 
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
@@ -150,14 +119,73 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
             elif encoding == "pb_bdd":
                 self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
+            else:
+                raise ValueError(f"Unsupported SAT encoding: {encoding}")
+            
 
         info = {
-            # "Nc": Nc, "Nd": Nd,
             "candidates": candidates,
             "bound": bound,
             "y": [self._y(j) for j in range(self.n)]
         }
         return cnf, info
+    
+    def _encode_wcnf_maxsat_setcover(self, radius: float):
+        """
+        Build a weighted partial MaxSAT model for one radius.
+
+        Set-covering MaxSAT formulation:
+        - hard clauses: coverage constraints for the tested radius R
+        - soft clauses: (-y_j) for each candidate center j, weight 1
+
+        The MaxSAT optimum cost is exactly the minimum number of selected centers
+        needed to cover all nodes within radius R. Therefore, R is feasible for the
+        p-Center problem iff optimum_cost <= p.
+
+        This keeps the same center variables and coverage clauses as the SAT
+        feasibility encoding, but moves the center-count constraint into the MaxSAT
+        objective instead of encoding it as hard NSC.
+        """
+        wcnf = WCNF()
+
+        active_demands = list(range(self.n))
+        candidates = list(range(self.n))
+
+        self._prepare_incremental_cover_order()
+
+        # Hard coverage clauses:
+        # For every demand u, at least one center within radius must be selected.
+        for u in active_demands:
+            allowed = []
+            for dcu, c in self._incremental_cover_order[u]:
+                if dcu <= radius + 1e-12:
+                    allowed.append(self.y_lit_all[c])
+                else:
+                    break
+
+            if not allowed:
+                return None, {}
+
+            wcnf.append(allowed)
+
+        # Soft clauses:
+        # Penalize every selected center. If y_j is true, (-y_j) is violated.
+        for j in candidates:
+            wcnf.append([-self.y_lit_all[j]], weight=1)
+
+        wcnf.nv = max(
+            getattr(wcnf, "nv", 0),
+            self.y_lit_all[-1] if self.n > 0 else 0,
+        )
+
+        info = {
+            "candidates": candidates,
+            "active_demands": active_demands,
+            "bound": self.p,
+            "y": [self._y(j) for j in range(self.n)],
+            "radius": radius,
+        }
+        return wcnf, info
 
     def _build_setcover_data(self, radius: float):
         """
@@ -169,14 +197,20 @@ class PCenterSAT:
         active_demands = list(range(self.n))
         candidates = list(range(self.n))
 
+        self._prepare_incremental_cover_order()
+
         cover_rows = []
         for u in active_demands:
             allowed = []
-            for c in candidates:
-                if self.dist[c][u] <= radius + 1e-12:
+            for dcu, c in self._incremental_cover_order[u]:
+                if dcu <= radius + 1e-12:
                     allowed.append(c)
+                else:
+                    break
+                
             if not allowed:
                 return None
+                
             cover_rows.append((u, allowed))
 
         return {
