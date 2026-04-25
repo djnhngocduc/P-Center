@@ -34,6 +34,7 @@ def _run_external_maxsat_solver(
     solver_name,
     wcnf,
     time_limit,
+    p_bound=None,
     cancel_ev=None,
     tmpdir=None,
 ):
@@ -74,10 +75,23 @@ def _run_external_maxsat_solver(
     time_bin = "/usr/bin/time"
     use_time_wrapper = os.path.exists(time_bin) and os.access(time_bin, os.X_OK)
 
-    if use_time_wrapper:
-        cmd = [time_bin, "-p", bin_path] + extra_args + [wcnf_path]
+    if solver_name == "maxcdcl":
+        if p_bound is None:
+            raise ValueError("maxcdcl requires p_bound for -p-centers.")
+
+        solver_args = [
+            f"-filename={wcnf_path}",
+            f"-p-centers={int(p_bound)}",
+            "-verb=0",
+            "-mem-lim=10000",
+        ]
     else:
-        cmd = [bin_path] + extra_args + [wcnf_path]
+        solver_args = extra_args + [wcnf_path]
+
+    if use_time_wrapper:
+        cmd = [time_bin, "-p", bin_path] + solver_args
+    else:
+        cmd = [bin_path] + solver_args
 
     proc = subprocess.Popen(
         cmd,
@@ -126,7 +140,13 @@ def _run_external_maxsat_solver(
         except Exception:
             pass
 
-    status, cost, model = _parse_maxsat_model(stdout or "")
+    if solver_name == "maxcdcl":
+        status, cost, model = _parse_pcenter_maxcdcl_output(
+            stdout or "",
+            p_bound=int(p_bound),
+        )
+    else:
+        status, cost, model = _parse_maxsat_model(stdout or "")
 
     cpu_time = None
     if use_time_wrapper:
@@ -162,11 +182,17 @@ def _run_external_maxsat_solver(
             print(stderr, file=sys.stderr, flush=True)
 
     if status in ("optimum", "sat") and not model:
-        print(
-            f"[MAXSAT-SOLVER-WARN] {solver_name} reported {status} but no model.",
-            flush=True,
-        )
-        return "error", cost, [], cpu_time
+        if not (
+            solver_name == "maxcdcl"
+            and cost is not None
+            and p_bound is not None
+            and cost > int(p_bound)
+        ):
+            print(
+                f"[MAXSAT-SOLVER-WARN] {solver_name} reported {status} but no model.",
+                flush=True,
+            )
+            return "error", cost, [], cpu_time
 
     return status, cost, model, cpu_time
 
@@ -240,6 +266,59 @@ def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
 
     return status, cost, model
 
+def _parse_pcenter_maxcdcl_output(stdout: str, p_bound: int) -> Tuple[str, Optional[int], List[int]]:
+    """
+    Parse the custom p-center MaxCDCL output.
+
+    This MaxCDCL build is not a standard MaxSAT CLI solver. It is called with:
+      -filename=<wcnf_file> -p-centers=<p> -verb=<level> -mem-lim=<MB>
+
+    It prints:
+      v <selected-positive-lits> 0
+      Optimal
+
+    or:
+      Infeasible
+
+    For the outer binary search we only need:
+      cost <= p  => feasible
+      cost >  p  => infeasible
+    """
+    model = []
+    final_status = None
+
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        if line.startswith("v ") or line.startswith("V "):
+            for tok in line.split()[1:]:
+                if tok == "0":
+                    continue
+                try:
+                    model.append(int(tok))
+                except ValueError:
+                    pass
+
+        elif line == "Optimal":
+            final_status = "Optimal"
+
+        elif line == "Infeasible":
+            final_status = "Infeasible"
+
+        elif "Out of Memory" in line or "Memory limit" in line:
+            return "error", None, []
+
+    if final_status == "Optimal":
+        # Feasible with <= p centers. Returning p_bound is enough for feasibility.
+        return "optimum", int(p_bound), model
+
+    if final_status == "Infeasible":
+        # Proven infeasible with <= p centers.
+        return "optimum", int(p_bound) + 1, model
+
+    return "error", None, model
 
 def _wcnf_to_data(wcnf):
     """
@@ -391,7 +470,7 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         except Exception:
             pass
 
-def _solve_wcnf(wcnf, solver_name, time_limit):
+def _solve_wcnf(wcnf, solver_name, time_limit, p_bound=None):
     if solver_name in PYSAT_MAXSAT_SOLVERS:
         return _solve_wcnf_pysat(wcnf, solver_name, time_limit)
 
@@ -400,6 +479,7 @@ def _solve_wcnf(wcnf, solver_name, time_limit):
             solver_name=solver_name,
             wcnf=wcnf,
             time_limit=time_limit,
+            p_bound=p_bound,
         )
 
     supported = sorted(PYSAT_MAXSAT_SOLVERS) + sorted(EXTERNAL_MAXSAT_SOLVERS)
@@ -477,7 +557,12 @@ def search_min_radius_maxsat(
             hi = mid - 1
             continue
 
-        status, cost, model, cpu_sec = _solve_wcnf(wcnf, solver_name, time_limit)
+        status, cost, model, cpu_sec = _solve_wcnf(
+            wcnf, 
+            solver_name, 
+            time_limit,
+            p_bound=inst.p
+        )
 
         last_nvars = wcnf.nv
         last_nclauses = len(wcnf.hard) + len(wcnf.soft)
