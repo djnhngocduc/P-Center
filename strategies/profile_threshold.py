@@ -3,7 +3,13 @@ import threading
 import json
 from collections import defaultdict
 import statistics as _stats
-from solvers.backend import EXTERNAL_SOLVERS, cpu_self_seconds, solve_radius_gurobi, solve_radius_cplex
+
+from solvers.backend import (
+    EXTERNAL_SOLVERS,
+    cpu_self_seconds,
+    solve_radius_gurobi,
+    solve_radius_cplex,
+)
 from utils.threshold import remaining_iters_from_bounds, solver_wall_cost
 from pysat.solvers import Solver
 from utils.io import write_csv_rows
@@ -96,8 +102,10 @@ def profile_threshold_sat_vs_mip(
 
     next_var = base_cnf.nv + 1
     tested = {}
+    decided = {}
 
     detail_rows = []
+    stop_status = None
 
     print(
         f"[THRESHOLD-INIT] encoding={encoding} sat_solver={sat_solver_name} mip_backend={mip_backend} "
@@ -247,18 +255,34 @@ def profile_threshold_sat_vs_mip(
             )
 
             decision_status = sat_status
+            decision_centers = sat_centers
+
             if decision_status not in ("sat", "unsat"):
                 decision_status = mip_status
+                decision_centers = mip_centers
+
+            decided[mid] = decision_status
 
             if decision_status == "sat":
                 best_sat_idx = mid
-                best_centers = sat_centers if sat_centers is not None else mip_centers
+                best_centers = decision_centers
                 lo = mid + 1
+
             elif decision_status == "unsat":
                 hi = mid - 1
-            elif decision_status == "timeout":
+
+            elif decision_status in ("timeout", "error"):
+                if best_sat_idx is not None:
+                    stop_status = f"{decision_status}_with_incumbent"
+                    print(
+                        f"[THRESHOLD-FALLBACK] stop on {decision_status}; "
+                        f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                        flush=True
+                    )
+                    break
+
                 return {
-                    "status": "timeout",
+                    "status": decision_status,
                     "best_radius": None,
                     "detail_rows": detail_rows,
                     "summary_rows": [],
@@ -266,7 +290,17 @@ def profile_threshold_sat_vs_mip(
                     "best_threshold_total_wall": None,
                     "search_time": time.perf_counter() - search_t0,
                 }
+
             else:
+                if best_sat_idx is not None:
+                    stop_status = "error_with_incumbent"
+                    print(
+                        f"[THRESHOLD-FALLBACK] stop on unexpected status={decision_status}; "
+                        f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
+                        flush=True
+                    )
+                    break
+
                 return {
                     "status": "error",
                     "best_radius": None,
@@ -423,14 +457,43 @@ def profile_threshold_sat_vs_mip(
 
     best_radius = radii[best_sat_idx] if best_sat_idx is not None else None
 
+    if best_sat_idx is None:
+        final_status = "infeasible"
+
+    elif stop_status is not None:
+        final_status = stop_status
+
+    else:
+        cert_unsat_idx = best_sat_idx + 1
+        certified = (
+            cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
+        )
+
+        if certified:
+            final_status = "OK"
+            print(
+                f"[THRESHOLD-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+                f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+                flush=True
+            )
+        else:
+            final_status = "uncertified"
+            print(
+                f"[THRESHOLD-FALLBACK] best SAT found but UNSAT boundary not certified; "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius}",
+                flush=True
+            )
+
     print(
-        f"[THRESHOLD-RESULT] best_radius={best_radius} mip_backend={mip_backend} "
-        f"best_threshold={best_threshold} best_threshold_total_wall={best_threshold_total_wall}",
+        f"[THRESHOLD-RESULT] status={final_status} best_radius={best_radius} "
+        f"mip_backend={mip_backend} best_threshold={best_threshold} "
+        f"best_threshold_total_wall={best_threshold_total_wall}",
         flush=True
     )
 
     return {
-        "status": "OK" if best_sat_idx is not None else "infeasible",
+        "status": final_status,
         "best_radius": best_radius,
         "detail_rows": detail_rows,
         "summary_rows": summary_export_rows,

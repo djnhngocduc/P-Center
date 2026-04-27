@@ -42,6 +42,7 @@ def search_min_radius_incremental(
 
     next_var = base_cnf.nv + 1
     tested = {}
+    decided = {}
 
     print(
         f"[INC-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
@@ -107,6 +108,7 @@ def search_min_radius_incremental(
             cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
 
             if sat is None:
+                decided[mid] = "timeout"
                 print(
                     f"[INC-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
                     flush=True
@@ -115,6 +117,7 @@ def search_min_radius_incremental(
                 return "timeout", None, next_var - 1, None, None, cpu_sec, search_elapsed
 
             if sat:
+                decided[mid] = "sat"
                 model = solver.get_model() or []
                 model_set = set(model)
                 centers = sorted([j for j, v in enumerate(y_vars) if v in model_set])
@@ -130,6 +133,7 @@ def search_min_radius_incremental(
 
                 lo = mid + 1
             else:
+                decided[mid] = "unsat"
                 print(
                     f"[INC-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
                     flush=True
@@ -146,15 +150,36 @@ def search_min_radius_incremental(
     nvars = next_var - 1
     nclauses = len(base_cnf.clauses) + (len(tested) * inst.n)
 
+    cert_unsat_idx = best_sat_idx + 1
+    certified = (
+        cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
+    )
+
+    if certified:
+        final_status = "OK"
+        print(
+            f"[INC-CERT] optimality boundary: "
+            f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+            flush=True
+        )
+    else:
+        final_status = "uncertified"
+        print(
+            f"[INC-FALLBACK] best SAT found but UNSAT boundary not certified; "
+            f"best_sat_idx={best_sat_idx}, best_R={best_radius}",
+            flush=True
+        )
+
     print(
-        f"[INC-RESULT] status=OK best_idx={best_sat_idx} "
+        f"[INC-RESULT] status={final_status} best_idx={best_sat_idx} "
         f"best_R={best_radius} cpu={best_sat_cpu}",
         flush=True
     )
 
     search_elapsed = time.perf_counter() - search_t0
     return (
-        "OK",
+        final_status,
         best_radius,
         nvars,
         nclauses,

@@ -257,7 +257,7 @@ def search_min_radius_parallel(
             f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]}",
             flush=True
         )
-        final_status = "OK"
+        final_status = "uncertified"
 
     print(
         f"[PARALLEL-RESULT] status={final_status} best_idx={best_sat_idx} "
@@ -403,7 +403,17 @@ def search_min_radius_binary(
                         f"use best_sat_idx={best_sat_idx} R={radii[best_sat_idx]}",
                         flush=True
                     )
-                    break
+                    final_status = f"{status}_with_incumbent"
+                    search_elapsed = time.perf_counter() - search_t0
+                    return (
+                        final_status,
+                        radii[best_sat_idx],
+                        best_nvars,
+                        best_nclauses,
+                        best_centers,
+                        best_sat_cpu,
+                        search_elapsed,
+                    )
 
                 search_elapsed = time.perf_counter() - search_t0
                 return status, None, nvars, nclauses, None, cpu_sec, search_elapsed
@@ -433,7 +443,7 @@ def search_min_radius_binary(
             f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]}",
             flush=True
         )
-        final_status = "OK"
+        final_status = "uncertified"
 
     print(
         f"[BINARY-RESULT] status={final_status} best_idx={best_sat_idx} "
@@ -706,7 +716,7 @@ def search_min_radius_kary(
             f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]}",
             flush=True
         )
-        final_status = "OK"
+        final_status = "uncertified"
 
     print(
         f"[KARY-RESULT] status={final_status} best_idx={best_sat_idx} "

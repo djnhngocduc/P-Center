@@ -464,6 +464,7 @@ def search_min_radius_hybrid_race(
     best_cpu = None
     best_nvars = None
     best_nclauses = None
+    decided = {}
 
     step_counter = itertools.count(1)
 
@@ -561,6 +562,8 @@ def search_min_radius_hybrid_race(
 
             if winner_backend == "sat":
                 idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = winner_result
+                decided[idx1] = s_status
+
                 if s_status == "sat":
                     best_sat_idx = idx1
                     best_centers = s_centers
@@ -573,6 +576,8 @@ def search_min_radius_hybrid_race(
 
             elif winner_backend == mip_backend:
                 idx2, R2, m_status, m_cpu, m_nvars, m_nclauses, m_centers = winner_result
+                decided[idx2] = m_status
+
                 if m_status == "sat":
                     best_sat_idx = idx2
                     best_centers = m_centers
@@ -615,9 +620,30 @@ def search_min_radius_hybrid_race(
         return "infeasible", None, None, None, None, None, search_elapsed
 
     best_radius = radii[best_sat_idx]
+    cert_unsat_idx = best_sat_idx + 1
+    certified = (
+        cert_unsat_idx < len(radii) and decided.get(cert_unsat_idx) == "unsat"
+    )
+
+    if certified:
+        final_status = "OK"
+        _log(
+            f"[HYBRID-RACE-CERT] optimality boundary: "
+            f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+            flush=True,
+        )
+    else:
+        final_status = "uncertified"
+        _log(
+            f"[HYBRID-RACE-FALLBACK] best SAT found but UNSAT boundary not certified; "
+            f"best_sat_idx={best_sat_idx}, best_R={best_radius}",
+            flush=True,
+        )
+
     search_elapsed = time.perf_counter() - search_t0
     return (
-        "OK",
+        final_status,
         best_radius,
         best_nvars,
         best_nclauses,

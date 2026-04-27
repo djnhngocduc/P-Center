@@ -118,7 +118,10 @@ def run_experiment(
     if "cplex_cp" in solvers and search_mode not in ("parallel", "binary", "kary"):
         raise ValueError("CPO backend currently supports only parallel, binary, or kary search.")
     if "gurobi_mip" in solvers and search_mode not in ("parallel", "binary", "kary"):
-        raise ValueError("Gurobi backend currently supports only parallel, binary, or kary search.")
+        raise ValueError(
+            "Gurobi backend in --solvers only supports parallel, binary, or kary search. "
+            "For hybrid modes, use --mip-backend gurobi_mip instead."
+        )
     
     results = []
     load_t0 = time.perf_counter()
@@ -223,9 +226,9 @@ def run_experiment(
             )
 
         for s in solvers:
-            if s not in ("rc2", "maxcdcl", "openwbo"):
+            if s not in ("rc2", "openwbo"):
                 raise ValueError(
-                    "maxsat mode supports only --solvers rc2, maxcdcl, openwbo"
+                    "maxsat mode supports only --solvers rc2, openwbo"
                 )
 
     for solver_name in solvers:
@@ -314,7 +317,7 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "maxcdcl": 7, "openwbo": 8, "cplex_mip": 9, "cplex_cp": 10, "gurobi_mip": 11}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "cplex_cp": 9, "gurobi_mip": 10}
     mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "maxsat": 4, "threshold_profile": 5, "hybrid_threshold": 6, "hybrid_race": 7}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
@@ -350,7 +353,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         cpus = [
             x.get("cpu")
             for x in runs
-            if x.get("status") == "OK"
+            if x.get("status") in ("OK", "uncertified")
             and x.get("best_radius") == gR
             and x.get("cpu") is not None
         ]
@@ -358,7 +361,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         loads = [
             x.get("load_time")
             for x in runs
-            if x.get("status") == "OK"
+            if x.get("status") in ("OK", "uncertified")
             and x.get("best_radius") == gR
             and x.get("load_time") is not None
         ]
@@ -366,7 +369,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         searches = [
             x.get("search_time")
             for x in runs
-            if x.get("status") == "OK"
+            if x.get("status") in ("OK", "uncertified")
             and x.get("best_radius") == gR
             and x.get("search_time") is not None
         ]
@@ -374,7 +377,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         totals = [
             x.get("total_time")
             for x in runs
-            if x.get("status") == "OK"
+            if x.get("status") in ("OK", "uncertified")
             and x.get("best_radius") == gR
             and x.get("total_time") is not None
         ]
@@ -441,7 +444,7 @@ def write_paper_table(all_results, out_csv_path: str):
             continue
 
         for x in runs:
-            if x.get("status") != "OK":
+            if x.get("status") not in ("OK", "uncertified"):
                 continue
             if x.get("best_radius") != gR:
                 continue

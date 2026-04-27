@@ -7,6 +7,7 @@ import traceback
 import multiprocessing as mp
 import threading
 from typing import Optional, Tuple, List
+import resource
 
 from pysat.formula import WCNF
 from pysat.examples.rc2 import RC2
@@ -20,30 +21,50 @@ PYSAT_MAXSAT_SOLVERS = {
 }
 
 EXTERNAL_MAXSAT_SOLVERS = {
-    "maxcdcl": (
-        os.path.join(BASE_DIR, "solvers", "MaxCDCL", "core", "maxcdcl_release"),
-        []
-    ),
     "openwbo": (
-        os.path.join(BASE_DIR, "solvers", "Open-WBO", "open-wbo_release"),
+        os.path.join(BASE_DIR, "solvers", "open-wbo", "open-wbo_release"),
         []
     ),
 }
+
+
+def _cpu_children_seconds() -> float:
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return float(usage.ru_utime + usage.ru_stime)
+
+
+def _extract_time_wrapper_cpu(stderr_text: str):
+    if not stderr_text:
+        return None
+
+    user_t = None
+    sys_t = None
+
+    for line in stderr_text.splitlines():
+        s = line.strip()
+        if s.startswith("user "):
+            try:
+                user_t = float(s.split()[1])
+            except Exception:
+                pass
+        elif s.startswith("sys "):
+            try:
+                sys_t = float(s.split()[1])
+            except Exception:
+                pass
+
+    if user_t is not None and sys_t is not None:
+        return user_t + sys_t
+
+    return None
 
 def _run_external_maxsat_solver(
     solver_name,
     wcnf,
     time_limit,
-    p_bound=None,
     cancel_ev=None,
     tmpdir=None,
 ):
-    """
-    Run an external MaxSAT solver on a temporary WCNF file.
-
-    Supported solvers are defined in EXTERNAL_MAXSAT_SOLVERS.
-    This follows the same style as run_external_solver() for external SAT solvers.
-    """
     bin_path, extra_args = EXTERNAL_MAXSAT_SOLVERS[solver_name]
 
     if (not os.path.exists(bin_path)) or (not os.access(bin_path, os.X_OK)):
@@ -75,24 +96,14 @@ def _run_external_maxsat_solver(
     time_bin = "/usr/bin/time"
     use_time_wrapper = os.path.exists(time_bin) and os.access(time_bin, os.X_OK)
 
-    if solver_name == "maxcdcl":
-        if p_bound is None:
-            raise ValueError("maxcdcl requires p_bound for -p-centers.")
-
-        solver_args = [
-            f"-filename={wcnf_path}",
-            f"-p-centers={int(p_bound)}",
-            "-verb=0",
-            "-mem-lim=10000",
-        ]
-    else:
-        solver_args = extra_args + [wcnf_path]
+    solver_args = extra_args + [wcnf_path]
 
     if use_time_wrapper:
         cmd = [time_bin, "-p", bin_path] + solver_args
     else:
         cmd = [bin_path] + solver_args
 
+    child_cpu0 = _cpu_children_seconds()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -126,12 +137,15 @@ def _run_external_maxsat_solver(
             pass
 
         try:
-            proc.communicate(timeout=1)
+            stdout, stderr = proc.communicate(timeout=1)
         except Exception:
-            pass
+            stdout, stderr = "", ""
 
         print(f"[MAXSAT-SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        return "timeout", None, [], float(time_limit if time_limit else 0.0)
+        cpu_time = _extract_time_wrapper_cpu(stderr or "")
+        if cpu_time is None:
+            cpu_time = max(0.0, _cpu_children_seconds() - child_cpu0)
+        return "timeout", None, [], cpu_time
 
     finally:
         try:
@@ -140,37 +154,12 @@ def _run_external_maxsat_solver(
         except Exception:
             pass
 
-    if solver_name == "maxcdcl":
-        status, cost, model = _parse_pcenter_maxcdcl_output(
-            stdout or "",
-            p_bound=int(p_bound),
-        )
-    else:
-        status, cost, model = _parse_maxsat_model(stdout or "")
+    status, cost, model = _parse_maxsat_model(stdout or "")
 
-    cpu_time = None
-    if use_time_wrapper:
-        user_t = None
-        sys_t = None
-
-        for line in (stderr or "").splitlines():
-            s = line.strip()
-            if s.startswith("user "):
-                try:
-                    user_t = float(s.split()[1])
-                except Exception:
-                    pass
-            elif s.startswith("sys "):
-                try:
-                    sys_t = float(s.split()[1])
-                except Exception:
-                    pass
-
-        if user_t is not None and sys_t is not None:
-            cpu_time = user_t + sys_t
+    cpu_time = _extract_time_wrapper_cpu(stderr or "") if use_time_wrapper else None
 
     if cpu_time is None:
-        cpu_time = 0.0
+        cpu_time = max(0.0, _cpu_children_seconds() - child_cpu0)
 
     if status == "error" and proc.returncode not in (0, 10, 20, 30):
         print(
@@ -182,24 +171,18 @@ def _run_external_maxsat_solver(
             print(stderr, file=sys.stderr, flush=True)
 
     if status in ("optimum", "sat") and not model:
-        if not (
-            solver_name == "maxcdcl"
-            and cost is not None
-            and p_bound is not None
-            and cost > int(p_bound)
-        ):
-            print(
-                f"[MAXSAT-SOLVER-WARN] {solver_name} reported {status} but no model.",
-                flush=True,
-            )
-            return "error", cost, [], cpu_time
+        print(
+            f"[MAXSAT-SOLVER-WARN] {solver_name} reported {status} but no model.",
+            flush=True,
+        )
+        return "error", cost, [], cpu_time
 
     return status, cost, model, cpu_time
 
 def _write_wcnf(wcnf, path: str) -> None:
     """
     Write a PySAT WCNF object to weighted DIMACS format.
-    This is used by the external MaxCDCL backend.
+    This is used by external MaxSAT backends.
     """
     hard = list(getattr(wcnf, "hard", []))
     soft = list(getattr(wcnf, "soft", []))
@@ -266,60 +249,6 @@ def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
 
     return status, cost, model
 
-def _parse_pcenter_maxcdcl_output(stdout: str, p_bound: int) -> Tuple[str, Optional[int], List[int]]:
-    """
-    Parse the custom p-center MaxCDCL output.
-
-    This MaxCDCL build is not a standard MaxSAT CLI solver. It is called with:
-      -filename=<wcnf_file> -p-centers=<p> -verb=<level> -mem-lim=<MB>
-
-    It prints:
-      v <selected-positive-lits> 0
-      Optimal
-
-    or:
-      Infeasible
-
-    For the outer binary search we only need:
-      cost <= p  => feasible
-      cost >  p  => infeasible
-    """
-    model = []
-    final_status = None
-
-    for raw in stdout.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-
-        if line.startswith("v ") or line.startswith("V "):
-            for tok in line.split()[1:]:
-                if tok == "0":
-                    continue
-                try:
-                    model.append(int(tok))
-                except ValueError:
-                    pass
-
-        elif line == "Optimal":
-            final_status = "Optimal"
-
-        elif line == "Infeasible":
-            final_status = "Infeasible"
-
-        elif "Out of Memory" in line or "Memory limit" in line:
-            return "error", None, []
-
-    if final_status == "Optimal":
-        # Feasible with <= p centers. Returning p_bound is enough for feasibility.
-        return "optimum", int(p_bound), model
-
-    if final_status == "Infeasible":
-        # Proven infeasible with <= p centers.
-        return "optimum", int(p_bound) + 1, model
-
-    return "error", None, model
-
 def _wcnf_to_data(wcnf):
     """
     Convert WCNF into plain Python lists so the RC2 worker can be spawned safely.
@@ -356,19 +285,16 @@ def _pysat_maxsat_worker(wcnf_data, solver_name, send_conn):
     try:
         wcnf = _wcnf_from_data(wcnf_data)
 
-        cpu0 = cpu_self_seconds()
-        wall0 = time.perf_counter()
-
         if solver_name in PYSAT_MAXSAT_SOLVERS:
             with RC2(wcnf) as solver:
+                cpu0 = cpu_self_seconds()
                 model = solver.compute()
+                cpu1 = cpu_self_seconds()
                 cost = solver.cost
         else:
             raise ValueError(f"Unsupported PySAT MaxSAT solver: {solver_name}")
 
-        cpu1 = cpu_self_seconds()
-        wall = time.perf_counter() - wall0
-        cpu = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else wall
+        cpu = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
 
         if model is None:
             send_conn.send(("error", cost, [], cpu))
@@ -427,7 +353,7 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         daemon=True,
     )
 
-    wall0 = time.perf_counter()
+    child_cpu0 = _cpu_children_seconds()
     proc.start()
 
     try:
@@ -442,16 +368,17 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
             msg = recv_conn.recv()
         else:
             if not recv_conn.poll(timeout):
-                wall = time.perf_counter() - wall0
                 _terminate_process_fast(proc)
-                return "timeout", None, [], wall
+                cpu = max(0.0, _cpu_children_seconds() - child_cpu0)
+                return "timeout", None, [], cpu
 
             msg = recv_conn.recv()
 
         proc.join(timeout=0.2)
 
         if not msg:
-            return "error", None, [], time.perf_counter() - wall0
+            cpu = max(0.0, _cpu_children_seconds() - child_cpu0)
+            return "error", None, [], cpu
 
         status, cost, model, cpu, *rest = msg
 
@@ -461,7 +388,8 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         return status, cost, model, cpu
 
     except EOFError:
-        return "error", None, [], time.perf_counter() - wall0
+        cpu = max(0.0, _cpu_children_seconds() - child_cpu0)
+        return "error", None, [], cpu
 
     finally:
         _terminate_process_fast(proc)
@@ -470,7 +398,7 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         except Exception:
             pass
 
-def _solve_wcnf(wcnf, solver_name, time_limit, p_bound=None):
+def _solve_wcnf(wcnf, solver_name, time_limit):
     if solver_name in PYSAT_MAXSAT_SOLVERS:
         return _solve_wcnf_pysat(wcnf, solver_name, time_limit)
 
@@ -479,7 +407,6 @@ def _solve_wcnf(wcnf, solver_name, time_limit, p_bound=None):
             solver_name=solver_name,
             wcnf=wcnf,
             time_limit=time_limit,
-            p_bound=p_bound,
         )
 
     supported = sorted(PYSAT_MAXSAT_SOLVERS) + sorted(EXTERNAL_MAXSAT_SOLVERS)
@@ -532,6 +459,9 @@ def search_min_radius_maxsat(
 
     best_radius = None
     best_centers = None
+    best_nvars = None
+    best_nclauses = None
+    best_cpu = None
     last_nvars = None
     last_nclauses = None
     last_cpu = None
@@ -545,15 +475,16 @@ def search_min_radius_maxsat(
             return (
                 "cancelled",
                 best_radius,
-                last_nvars,
-                last_nclauses,
+                best_nvars if best_radius is not None else last_nvars,
+                best_nclauses if best_radius is not None else last_nclauses,
                 best_centers,
-                last_cpu,
+                best_cpu if best_radius is not None else last_cpu,
                 time.perf_counter() - search_t0,
             )
 
         wcnf, info = inst._encode_wcnf_maxsat_setcover(radius)
         if wcnf is None:
+            last_cpu = 0.0
             hi = mid - 1
             continue
 
@@ -561,7 +492,6 @@ def search_min_radius_maxsat(
             wcnf, 
             solver_name, 
             time_limit,
-            p_bound=inst.p
         )
 
         last_nvars = wcnf.nv
@@ -588,6 +518,9 @@ def search_min_radius_maxsat(
             # Feasible radius: try smaller radii.
             best_radius = radius
             best_centers = centers
+            best_nvars = last_nvars
+            best_nclauses = last_nclauses
+            best_cpu = last_cpu
             final_status = "OK"
             lo = mid + 1
         else:
@@ -597,9 +530,9 @@ def search_min_radius_maxsat(
     return (
         final_status,
         best_radius,
-        last_nvars,
-        last_nclauses,
+        best_nvars,
+        best_nclauses,
         best_centers,
-        last_cpu,
+        best_cpu,
         time.perf_counter() - search_t0,
     )
