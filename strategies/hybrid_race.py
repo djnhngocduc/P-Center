@@ -122,7 +122,6 @@ def _solve_radius_sat_once(
     nvars = cnf.nv
     nclauses = len(cnf.clauses)
 
-    # External SAT solver
     if solver_name in EXTERNAL_SOLVERS:
         base_tmp = "/dev/shm" if os.path.isdir("/dev/shm") else None
         local_tmpdir = tempfile.mkdtemp(prefix="pcsat_race_", dir=base_tmp)
@@ -163,7 +162,6 @@ def _solve_radius_sat_once(
             except Exception:
                 pass
 
-    # Internal PySAT solver
     solver = Solver(name=solver_name, bootstrap_with=cnf.clauses)
     try:
         if cancel_ev is not None and hasattr(solver, "interrupt"):

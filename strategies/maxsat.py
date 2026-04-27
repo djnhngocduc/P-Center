@@ -180,10 +180,6 @@ def _run_external_maxsat_solver(
     return status, cost, model, cpu_time
 
 def _write_wcnf(wcnf, path: str) -> None:
-    """
-    Write a PySAT WCNF object to weighted DIMACS format.
-    This is used by external MaxSAT backends.
-    """
     hard = list(getattr(wcnf, "hard", []))
     soft = list(getattr(wcnf, "soft", []))
     weights = list(getattr(wcnf, "wght", []))
@@ -202,12 +198,6 @@ def _write_wcnf(wcnf, path: str) -> None:
 
 
 def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
-    """
-    Parse common MaxSAT output:
-      s OPTIMUM FOUND
-      o <cost>
-      v <lits...>
-    """
     status = "error"
     cost = None
     model = []
@@ -250,9 +240,6 @@ def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
     return status, cost, model
 
 def _wcnf_to_data(wcnf):
-    """
-    Convert WCNF into plain Python lists so the RC2 worker can be spawned safely.
-    """
     return {
         "nv": int(getattr(wcnf, "nv", 0)),
         "hard": [list(map(int, cl)) for cl in getattr(wcnf, "hard", [])],
@@ -262,9 +249,6 @@ def _wcnf_to_data(wcnf):
 
 
 def _wcnf_from_data(data):
-    """
-    Rebuild a PySAT WCNF object from plain Python lists.
-    """
     wcnf = WCNF()
 
     for cl in data["hard"]:
@@ -278,10 +262,6 @@ def _wcnf_from_data(data):
 
 
 def _pysat_maxsat_worker(wcnf_data, solver_name, send_conn):
-    """
-    Run a PySAT MaxSAT solver in a child process so the parent can enforce
-    a hard timeout.
-    """
     try:
         wcnf = _wcnf_from_data(wcnf_data)
 
@@ -340,12 +320,6 @@ def _terminate_process_fast(proc, grace=0.2):
 
 
 def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
-    """
-    Solve a weighted partial MaxSAT instance using a PySAT MaxSAT solver.
-
-    The solver is executed in a child process so the parent process can enforce
-    the experiment time limit.
-    """
     recv_conn, send_conn = mp.Pipe(duplex=False)
     proc = mp.Process(
         target=_pysat_maxsat_worker,
@@ -431,21 +405,6 @@ def search_min_radius_maxsat(
     mgr=None,
     cancel_dict=None,
 ):
-    """
-    MaxSAT-based feasibility solving for p-Center.
-
-    For one tested radius R:
-      - hard clauses = coverage(R)
-      - soft clauses = (-y_j), weight 1, for all candidate centers j
-
-    The MaxSAT optimum cost is the minimum number of centers required to cover all
-    nodes under radius R. Therefore:
-      cost <= p  => R is feasible
-      cost >  p  => R is infeasible
-
-    The outer optimization over R is still performed by binary search over the
-    descending candidate radius list.
-    """
     if encoding not in ("maxsat_setcover", "maxsat_cover"):
         raise ValueError(
             "MaxSAT set-cover mode expects --encodings maxsat_setcover "
@@ -454,43 +413,66 @@ def search_min_radius_maxsat(
 
     search_t0 = time.perf_counter()
 
-    lo = 0
-    hi = len(inst.radii) - 1
+    radii = inst.radii
+    nR = len(radii)
 
+    if nR == 0:
+        search_elapsed = time.perf_counter() - search_t0
+        return "infeasible", None, None, None, None, None, search_elapsed
+
+    lo = 0
+    hi = nR - 1
+
+    best_sat_idx = None
     best_radius = None
     best_centers = None
     best_nvars = None
     best_nclauses = None
     best_cpu = None
+
     last_nvars = None
     last_nclauses = None
     last_cpu = None
-    final_status = "infeasible"
+
+    decided = {}
 
     while lo <= hi:
         mid = (lo + hi) // 2
-        radius = inst.radii[mid]
+        radius = radii[mid]
 
         if cancel_dict is not None and cancel_dict.get("cancel", False):
+            search_elapsed = time.perf_counter() - search_t0
+            if best_sat_idx is not None:
+                return (
+                    "cancelled_with_incumbent",
+                    best_radius,
+                    best_nvars,
+                    best_nclauses,
+                    best_centers,
+                    best_cpu,
+                    search_elapsed,
+                )
             return (
                 "cancelled",
-                best_radius,
-                best_nvars if best_radius is not None else last_nvars,
-                best_nclauses if best_radius is not None else last_nclauses,
-                best_centers,
-                best_cpu if best_radius is not None else last_cpu,
-                time.perf_counter() - search_t0,
+                None,
+                last_nvars,
+                last_nclauses,
+                None,
+                last_cpu,
+                search_elapsed,
             )
 
         wcnf, info = inst._encode_wcnf_maxsat_setcover(radius)
+
         if wcnf is None:
+            decided[mid] = "unsat"
             last_cpu = 0.0
             hi = mid - 1
             continue
 
         status, cost, model, cpu_sec = _solve_wcnf(
-            wcnf, 
-            solver_name, 
+            wcnf,
+            solver_name,
             time_limit,
         )
 
@@ -499,14 +481,29 @@ def search_min_radius_maxsat(
         last_cpu = cpu_sec
 
         if status not in ("optimum", "sat"):
+            decided[mid] = status
+
+            if status in ("timeout", "error") and best_sat_idx is not None:
+                search_elapsed = time.perf_counter() - search_t0
+                return (
+                    f"{status}_with_incumbent",
+                    best_radius,
+                    best_nvars,
+                    best_nclauses,
+                    best_centers,
+                    best_cpu,
+                    search_elapsed,
+                )
+
+            search_elapsed = time.perf_counter() - search_t0
             return (
                 status,
-                best_radius,
+                None if best_sat_idx is None else best_radius,
                 last_nvars,
                 last_nclauses,
-                best_centers,
+                None if best_sat_idx is None else best_centers,
                 last_cpu,
-                time.perf_counter() - search_t0,
+                search_elapsed,
             )
 
         centers = _decode_centers(model, info["y"])
@@ -515,18 +512,54 @@ def search_min_radius_maxsat(
             cost = len(centers)
 
         if cost <= inst.p:
-            # Feasible radius: try smaller radii.
+            decided[mid] = "sat"
+
+            best_sat_idx = mid
             best_radius = radius
             best_centers = centers
             best_nvars = last_nvars
             best_nclauses = last_nclauses
             best_cpu = last_cpu
-            final_status = "OK"
+
             lo = mid + 1
         else:
-            # Infeasible radius: need larger radius.
+            decided[mid] = "unsat"
             hi = mid - 1
 
+    if best_sat_idx is None:
+        search_elapsed = time.perf_counter() - search_t0
+        return (
+            "infeasible",
+            None,
+            last_nvars,
+            last_nclauses,
+            None,
+            last_cpu,
+            search_elapsed,
+        )
+
+    cert_unsat_idx = best_sat_idx + 1
+    certified = (
+        cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
+    )
+
+    if certified:
+        final_status = "OK"
+        print(
+            f"[MAXSAT-CERT] optimality boundary: "
+            f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+            flush=True,
+        )
+    else:
+        final_status = "uncertified"
+        print(
+            f"[MAXSAT-FALLBACK] best SAT found but UNSAT boundary not certified; "
+            f"best_sat_idx={best_sat_idx}, best_R={best_radius}",
+            flush=True,
+        )
+
+    search_elapsed = time.perf_counter() - search_t0
     return (
         final_status,
         best_radius,
@@ -534,5 +567,5 @@ def search_min_radius_maxsat(
         best_nclauses,
         best_centers,
         best_cpu,
-        time.perf_counter() - search_t0,
+        search_elapsed,
     )
