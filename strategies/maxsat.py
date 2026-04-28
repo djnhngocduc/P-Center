@@ -6,6 +6,7 @@ import subprocess
 import traceback
 import multiprocessing as mp
 import threading
+import signal
 from typing import Optional, Tuple, List
 
 from pysat.formula import WCNF
@@ -23,6 +24,26 @@ EXTERNAL_MAXSAT_SOLVERS = {
         []
     ),
 }
+
+
+def _kill_subprocess_tree(proc):
+    if proc is None:
+        return
+
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 
 def _run_external_maxsat_solver(
     solver_name,
@@ -71,16 +92,13 @@ def _run_external_maxsat_solver(
         errors="ignore",
         cwd=solver_dir,
         env=env,
+        start_new_session=True,
     )
 
     if cancel_ev is not None:
         def _watch_cancel():
             cancel_ev.wait()
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            _kill_subprocess_tree(proc)
 
         threading.Thread(target=_watch_cancel, daemon=True).start()
 
@@ -89,10 +107,7 @@ def _run_external_maxsat_solver(
             timeout=time_limit if (time_limit and time_limit > 0) else None
         )
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _kill_subprocess_tree(proc)
 
         try:
             stdout, stderr = proc.communicate(timeout=1)
@@ -129,6 +144,7 @@ def _run_external_maxsat_solver(
 
     return status, cost, model
 
+
 def _write_wcnf(wcnf, path: str) -> None:
     hard = list(getattr(wcnf, "hard", []))
     soft = list(getattr(wcnf, "soft", []))
@@ -162,10 +178,10 @@ def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
         if line.startswith("s "):
             if "optimum" in low:
                 status = "optimum"
-            elif "satisfiable" in low:
-                status = "sat"
             elif "unsatisfiable" in low:
                 status = "unsat"
+            elif "satisfiable" in low:
+                status = "sat"
 
         elif line.startswith("o "):
             parts = line.split()
@@ -188,6 +204,7 @@ def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
         status = "optimum"
 
     return status, cost, model
+
 
 def _wcnf_to_data(wcnf):
     return {
@@ -314,6 +331,7 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         except Exception:
             pass
 
+
 def _solve_wcnf(wcnf, solver_name, time_limit):
     if solver_name in PYSAT_MAXSAT_SOLVERS:
         return _solve_wcnf_pysat(wcnf, solver_name, time_limit)
@@ -405,7 +423,24 @@ def search_min_radius_maxsat(
         if wcnf is None:
             decided[mid] = "unsat"
             hi = mid - 1
+            print(
+                f"[MAXSAT-DONE] solver={solver_name} idx={mid} R={radius} "
+                f"status=unsat_by_no_coverage cost=None wall=0.000000s",
+                flush=True,
+            )
             continue
+
+        last_nvars = wcnf.nv
+        last_nclauses = len(wcnf.hard) + len(wcnf.soft)
+
+        print(
+            f"[MAXSAT-STEP] solver={solver_name} idx={mid} R={radius} "
+            f"lo={lo} hi={hi} nvars={last_nvars} "
+            f"nclauses={last_nclauses} time_limit={time_limit}",
+            flush=True,
+        )
+
+        step_t0 = time.perf_counter()
 
         status, cost, model = _solve_wcnf(
             wcnf,
@@ -413,8 +448,13 @@ def search_min_radius_maxsat(
             time_limit,
         )
 
-        last_nvars = wcnf.nv
-        last_nclauses = len(wcnf.hard) + len(wcnf.soft)
+        step_wall = time.perf_counter() - step_t0
+
+        print(
+            f"[MAXSAT-DONE] solver={solver_name} idx={mid} R={radius} "
+            f"status={status} cost={cost} wall={step_wall:.6f}s",
+            flush=True,
+        )
 
         if status not in ("optimum", "sat"):
             decided[mid] = status
