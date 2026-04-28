@@ -10,15 +10,11 @@ from pysat.solvers import Solver
 
 from solvers.backend import (
     EXTERNAL_SOLVERS, 
-    cpu_self_seconds, 
     run_external_solver, 
     solve_radius_cplex, 
     solve_radius_gurobi, 
     solve_radius_cpo,
 )
-
-_cpu_self_seconds = cpu_self_seconds
-_run_external_solver = run_external_solver
 
 _CANCEL_SHARED = None
 _INST_SHARED = None
@@ -112,7 +108,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 f"-> UNSAT(by reduction)",
                 flush=True
             )
-            return idx, radius, "unsat", 0.0, None, None, None
+            return idx, radius, "unsat", None, None, None
 
         if solver_name in EXTERNAL_SOLVERS:
             cancel_ev = None
@@ -122,7 +118,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             except Exception:
                 cancel_ev = None
 
-            status, cpu_sec, model = _run_external_solver(
+            status, model = run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
@@ -136,18 +132,18 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             if status in ("timeout", "error"):
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> {status.upper()} cpu={cpu_sec:.6f}s",
+                    f"-> {status.upper()}",
                     flush=True
                 )
-                return idx, radius, status, cpu_sec, nvars, nclauses, None
+                return idx, radius, status, nvars, nclauses, None
 
             if status == "unsat":
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> UNSAT cpu={cpu_sec:.6f}s",
+                    f"-> UNSAT",
                     flush=True
                 )
-                return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+                return idx, radius, "unsat", nvars, nclauses, None
 
             model_set = set(model or [])
             y_vars = varmap.get("y", [])
@@ -161,10 +157,10 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             centers = sorted(chosen | Nc)
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> SAT cpu={cpu_sec:.6f}s centers={centers}",
+                f"-> SAT centers={centers}",
                 flush=True
             )
-            return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+            return idx, radius, "sat", nvars, nclauses, centers
 
         with Solver(name=solver_name, bootstrap_with=cnf.clauses) as solver:
             cancel_ev = None
@@ -190,19 +186,13 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
-                    cpu0 = _cpu_self_seconds()
                     try:
                         sat = solver.solve_limited(expect_interrupt=True)
                     except NotImplementedError:
                         sat = solver.solve()
-                    cpu1 = _cpu_self_seconds()
 
                 else:
-                    cpu0 = _cpu_self_seconds()
                     sat = solver.solve()
-                    cpu1 = _cpu_self_seconds()
-
-                cpu_sec = cpu1 - cpu0
 
                 nvars = cnf.nv
                 nclauses = len(cnf.clauses)
@@ -210,26 +200,26 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 if sat is None:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT cpu={cpu_sec:.6f}s",
+                        f"-> TIMEOUT",
                         flush=True
                     )
-                    return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+                    return idx, radius, "timeout", nvars, nclauses, None
                 if not sat:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> UNSAT cpu={cpu_sec:.6f}s",
+                        f"-> UNSAT",
                         flush=True
                     )
-                    return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+                    return idx, radius, "unsat", nvars, nclauses, None
 
                 model = solver.get_model() or []
                 if not model:
                     print(
                         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT(no model) cpu={cpu_sec:.6f}s",
+                        f"-> TIMEOUT(no model)",
                         flush=True
                     )
-                    return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+                    return idx, radius, "timeout", nvars, nclauses, None
 
                 model_set = set(model)
                 y_vars = varmap.get("y", [])
@@ -239,10 +229,10 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 centers = sorted(chosen | Nc)
                 print(
                     f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> SAT cpu={cpu_sec:.6f}s centers={centers}",
+                    f"-> SAT centers={centers}",
                     flush=True
                 )
-                return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+                return idx, radius, "sat", nvars, nclauses, centers
             finally:
                 if timer:
                     timer.cancel()
@@ -254,4 +244,4 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             file=sys.stderr,
             flush=True
         )
-        return idx, radius, "error", 0.0, None, None, None
+        return idx, radius, "error", None, None, None

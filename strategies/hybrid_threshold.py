@@ -3,7 +3,7 @@ import threading
 from concurrent.futures import ProcessPoolExecutor
 import traceback
 import sys
-from solvers.backend import EXTERNAL_SOLVERS, cpu_self_seconds, solve_radius_cplex, solve_radius_gurobi
+from solvers.backend import EXTERNAL_SOLVERS, solve_radius_cplex, solve_radius_gurobi
 from utils.threshold import remaining_iters_from_bounds
 from utils.worker import _solve_radius_worker_proc, _pool_initializer
 from pysat.solvers import Solver
@@ -83,7 +83,7 @@ def search_min_radius_hybrid_threshold(
 
         if not radii:
             search_elapsed = time.perf_counter() - search_t0
-            return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
+            return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, search_elapsed
 
         lo = 0
         hi = len(radii) - 1
@@ -102,7 +102,6 @@ def search_min_radius_hybrid_threshold(
 
         best_sat_idx = None
         best_centers = None
-        best_cpu = None
         best_nvars = None
         best_nclauses = None
 
@@ -142,13 +141,10 @@ def search_min_radius_hybrid_threshold(
                         alpha = tested[mid]
 
                     timer = None
-                    cpu0 = None
-                    cpu1 = None
                     try:
                         if time_limit and time_limit > 0 and hasattr(sat_solver, "interrupt"):
                             timer = threading.Timer(time_limit, sat_solver.interrupt)
                             timer.start()
-                            cpu0 = cpu_self_seconds()
                             try:
                                 sat = sat_solver.solve_limited(
                                     assumptions=[alpha],
@@ -156,21 +152,16 @@ def search_min_radius_hybrid_threshold(
                                 )
                             except NotImplementedError:
                                 sat = sat_solver.solve(assumptions=[alpha])
-                            cpu1 = cpu_self_seconds()
                         else:
-                            cpu0 = cpu_self_seconds()
                             sat = sat_solver.solve(assumptions=[alpha])
-                            cpu1 = cpu_self_seconds()
                     finally:
                         if timer:
                             timer.cancel()
 
-                    cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
-
                     if sat is None:
                         decided[mid] = "timeout"
                         print(
-                            f"[HYBRID-SAT-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
+                            f"[HYBRID-SAT-DONE] idx={mid} R={R} status=timeout",
                             flush=True
                         )
 
@@ -183,7 +174,7 @@ def search_min_radius_hybrid_threshold(
                             break
 
                         search_elapsed = time.perf_counter() - search_t0
-                        return "timeout", None, next_var - 1, None, None, cpu_sec, search_elapsed
+                        return "timeout", None, next_var - 1, None, None, search_elapsed
 
                     if sat:
                         decided[mid] = "sat"
@@ -193,26 +184,25 @@ def search_min_radius_hybrid_threshold(
 
                         best_sat_idx = mid
                         best_centers = centers
-                        best_cpu = cpu_sec
                         best_nvars = next_var - 1
                         best_nclauses = len(base_cnf.clauses) + added_clause_count
 
                         print(
                             f"[HYBRID-SAT-DONE] idx={mid} R={R} status=sat "
-                            f"cpu={cpu_sec:.6f}s centers={centers}",
+                            f"centers={centers}",
                             flush=True
                         )
                         lo = mid + 1
                     else:
                         decided[mid] = "unsat"
                         print(
-                            f"[HYBRID-SAT-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
+                            f"[HYBRID-SAT-DONE] idx={mid} R={R} status=unsat",
                             flush=True
                         )
                         hi = mid - 1
 
                 else:
-                    idx, Rret, status, cpu_sec, nvars_mip, nclauses_mip, centers = _solve_radius_mip(
+                    idx, Rret, status, nvars_mip, nclauses_mip, centers = _solve_radius_mip(
                         inst=inst,
                         idx=mid,
                         radius=R,
@@ -222,7 +212,7 @@ def search_min_radius_hybrid_threshold(
 
                     print(
                         f"[HYBRID-MIP-DONE] idx={idx} R={Rret} backend={mip_backend} status={status} "
-                        f"cpu={cpu_sec:.6f}s nvars={nvars_mip} nclauses={nclauses_mip}",
+                        f"nvars={nvars_mip} nclauses={nclauses_mip}",
                         flush=True
                     )
 
@@ -231,7 +221,6 @@ def search_min_radius_hybrid_threshold(
                     if status == "sat":
                         best_sat_idx = idx
                         best_centers = centers
-                        best_cpu = cpu_sec
                         best_nvars = nvars_mip
                         best_nclauses = nclauses_mip
                         lo = idx + 1
@@ -249,12 +238,12 @@ def search_min_radius_hybrid_threshold(
                             break
 
                         search_elapsed = time.perf_counter() - search_t0
-                        return status, None, nvars_mip, nclauses_mip, None, cpu_sec, search_elapsed
+                        return status, None, nvars_mip, nclauses_mip, None, search_elapsed
 
         if best_sat_idx is None:
             print("[HYBRID-RESULT] infeasible (no SAT found)", flush=True)
             search_elapsed = time.perf_counter() - search_t0
-            return "infeasible", None, None, None, None, None, search_elapsed
+            return "infeasible", None, None, None, None, search_elapsed
 
         best_radius = radii[best_sat_idx]
         cert_unsat_idx = best_sat_idx + 1
@@ -280,7 +269,7 @@ def search_min_radius_hybrid_threshold(
 
         print(
             f"[HYBRID-RESULT] status={final_status} best_idx={best_sat_idx} "
-            f"best_R={best_radius} cpu={best_cpu} threshold={hybrid_threshold} mip_backend={mip_backend}",
+            f"best_R={best_radius} threshold={hybrid_threshold} mip_backend={mip_backend}",
             flush=True
         )
 
@@ -291,7 +280,6 @@ def search_min_radius_hybrid_threshold(
             best_nvars,
             best_nclauses,
             best_centers,
-            best_cpu,
             search_elapsed,
         )
 
@@ -300,7 +288,7 @@ def search_min_radius_hybrid_threshold(
 
         if not radii:
             search_elapsed = time.perf_counter() - search_t0
-            return "infeasible", None, None, None, None, None, search_elapsed
+            return "infeasible", None, None, None, None, search_elapsed
 
         lo = 0
         hi = len(radii) - 1
@@ -315,7 +303,6 @@ def search_min_radius_hybrid_threshold(
 
         best_sat_idx = None
         best_centers = None
-        best_cpu = None
         best_nvars = None
         best_nclauses = None
 
@@ -346,7 +333,7 @@ def search_min_radius_hybrid_threshold(
                         time_limit,
                     )
                     try:
-                        idx, Rret, status, cpu_sec, nvars_sat, nclauses_sat, centers = fut.result()
+                        idx, Rret, status, nvars_sat, nclauses_sat, centers = fut.result()
                     except Exception:
                         tb = traceback.format_exc()
                         print(
@@ -354,13 +341,13 @@ def search_min_radius_hybrid_threshold(
                             file=sys.stderr,
                             flush=True
                         )
-                        idx, Rret, status, cpu_sec, nvars_sat, nclauses_sat, centers = (
-                            mid, R, "error", 0.0, None, None, None
+                        idx, Rret, status, nvars_sat, nclauses_sat, centers = (
+                            mid, R, "error", None, None, None
                         )
 
                     print(
                         f"[HYBRID-SAT-DONE] idx={idx} R={Rret} status={status} "
-                        f"cpu={cpu_sec:.6f}s nvars={nvars_sat} nclauses={nclauses_sat}",
+                        f"nvars={nvars_sat} nclauses={nclauses_sat}",
                         flush=True
                     )
 
@@ -369,7 +356,6 @@ def search_min_radius_hybrid_threshold(
                     if status == "sat":
                         best_sat_idx = idx
                         best_centers = centers
-                        best_cpu = cpu_sec
                         best_nvars = nvars_sat
                         best_nclauses = nclauses_sat
                         lo = idx + 1
@@ -387,10 +373,10 @@ def search_min_radius_hybrid_threshold(
                             break
 
                         search_elapsed = time.perf_counter() - search_t0
-                        return status, None, nvars_sat, nclauses_sat, None, cpu_sec, search_elapsed
+                        return status, None, nvars_sat, nclauses_sat, None, search_elapsed
 
                 else:
-                    idx, Rret, status, cpu_sec, nvars_mip, nclauses_mip, centers = _solve_radius_mip(
+                    idx, Rret, status, nvars_mip, nclauses_mip, centers = _solve_radius_mip(
                         inst=inst,
                         idx=mid,
                         radius=R,
@@ -400,7 +386,7 @@ def search_min_radius_hybrid_threshold(
 
                     print(
                         f"[HYBRID-MIP-DONE] idx={idx} R={Rret} backend={mip_backend} status={status} "
-                        f"cpu={cpu_sec:.6f}s nvars={nvars_mip} nclauses={nclauses_mip}",
+                        f"nvars={nvars_mip} nclauses={nclauses_mip}",
                         flush=True
                     )
 
@@ -409,7 +395,6 @@ def search_min_radius_hybrid_threshold(
                     if status == "sat":
                         best_sat_idx = idx
                         best_centers = centers
-                        best_cpu = cpu_sec
                         best_nvars = nvars_mip
                         best_nclauses = nclauses_mip
                         lo = idx + 1
@@ -427,12 +412,12 @@ def search_min_radius_hybrid_threshold(
                             break
 
                         search_elapsed = time.perf_counter() - search_t0
-                        return status, None, nvars_mip, nclauses_mip, None, cpu_sec, search_elapsed
+                        return status, None, nvars_mip, nclauses_mip, None, search_elapsed
 
         if best_sat_idx is None:
             print("[HYBRID-RESULT] infeasible (no SAT found)", flush=True)
             search_elapsed = time.perf_counter() - search_t0
-            return "infeasible", None, None, None, None, None, search_elapsed
+            return "infeasible", None, None, None, None, search_elapsed
 
         best_radius = radii[best_sat_idx]
         cert_unsat_idx = best_sat_idx + 1
@@ -458,7 +443,7 @@ def search_min_radius_hybrid_threshold(
 
         print(
             f"[HYBRID-RESULT] status={final_status} best_idx={best_sat_idx} "
-            f"best_R={best_radius} cpu={best_cpu} threshold={hybrid_threshold} mip_backend={mip_backend}",
+            f"best_R={best_radius} threshold={hybrid_threshold} mip_backend={mip_backend}",
             flush=True
         )
 
@@ -469,6 +454,5 @@ def search_min_radius_hybrid_threshold(
             best_nvars,
             best_nclauses,
             best_centers,
-            best_cpu,
             search_elapsed,
         )

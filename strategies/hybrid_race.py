@@ -23,7 +23,6 @@ from pysat.solvers import Solver
 from solvers.backend import (
     EXTERNAL_SOLVERS,
     run_external_solver,
-    cpu_self_seconds,
     solve_radius_cplex,
     solve_radius_gurobi,
 )
@@ -117,7 +116,7 @@ def _solve_radius_sat_once(
     cnf, varmap = inst._encode_cnf(radius, encoding)
 
     if cnf is None:
-        return idx, radius, "unsat", 0.0, None, None, None
+        return idx, radius, "unsat", None, None, None
 
     nvars = cnf.nv
     nclauses = len(cnf.clauses)
@@ -130,7 +129,7 @@ def _solve_radius_sat_once(
             if current_cancel_ref is not None and cancel_ev is not None:
                 current_cancel_ref["fn"] = cancel_ev.set
 
-            status, cpu_sec, model = run_external_solver(
+            status, model = run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
                 time_limit=time_limit,
@@ -139,10 +138,10 @@ def _solve_radius_sat_once(
             )
 
             if status in ("timeout", "error", "cancelled"):
-                return idx, radius, status, cpu_sec, nvars, nclauses, None
+                return idx, radius, status, nvars, nclauses, None
 
             if status == "unsat":
-                return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+                return idx, radius, "unsat", nvars, nclauses, None
 
             model_set = set(model or [])
             y_vars = varmap.get("y", [])
@@ -152,7 +151,7 @@ def _solve_radius_sat_once(
                 if (v in model_set) and (j in candidates)
             }
             centers = sorted(chosen)
-            return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+            return idx, radius, "sat", nvars, nclauses, centers
 
         finally:
             if current_cancel_ref is not None:
@@ -177,22 +176,18 @@ def _solve_radius_sat_once(
 
             threading.Thread(target=_watch_cancel, daemon=True).start()
 
-        cpu0 = cpu_self_seconds()
         try:
             sat = solver.solve_limited(expect_interrupt=True)
         except NotImplementedError:
             sat = solver.solve()
-        cpu1 = cpu_self_seconds()
-
-        cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
 
         if sat is None:
             if cancel_ev is not None and cancel_ev.is_set():
-                return idx, radius, "cancelled", cpu_sec, nvars, nclauses, None
-            return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+                return idx, radius, "cancelled", nvars, nclauses, None
+            return idx, radius, "timeout", nvars, nclauses, None
 
         if not sat:
-            return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+            return idx, radius, "unsat", nvars, nclauses, None
 
         model = solver.get_model() or []
         model_set = set(model)
@@ -203,7 +198,7 @@ def _solve_radius_sat_once(
             if (v in model_set) and (j in candidates)
         }
         centers = sorted(chosen)
-        return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+        return idx, radius, "sat", nvars, nclauses, centers
 
     finally:
         if current_cancel_ref is not None:
@@ -452,14 +447,13 @@ def search_min_radius_hybrid_race(
     radii = inst.radii
     if not radii:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     lo = 0
     hi = len(radii) - 1
 
     best_sat_idx = None
     best_centers = None
-    best_cpu = None
     best_nvars = None
     best_nclauses = None
     decided = {}
@@ -517,14 +511,14 @@ def search_min_radius_hybrid_race(
                     if conn is sat_result_recv:
                         if tag == "result":
                             sat_seen = payload
-                            idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = payload
+                            idx1, R1, s_status, s_nvars, s_nclauses, s_centers = payload
                             if s_status in ("sat", "unsat"):
                                 winner_backend = "sat"
                                 winner_result = payload
                                 _send_msg(mip_ctl_send, {"cmd": "cancel", "step": step})
                                 _log(
                                     f"[HYBRID-RACE-WIN] step={step} idx={idx1} R={R1} "
-                                    f"winner=SAT status={s_status} cpu={s_cpu:.6f}s",
+                                    f"winner=SAT status={s_status}",
                                     flush=True,
                                 )
                                 break
@@ -535,14 +529,14 @@ def search_min_radius_hybrid_race(
                     else:
                         if tag == "result":
                             mip_seen = payload
-                            idx2, R2, m_status, m_cpu, m_nvars, m_nclauses, m_centers = payload
+                            idx2, R2, m_status, m_nvars, m_nclauses, m_centers = payload
                             if m_status in ("sat", "unsat"):
                                 winner_backend = mip_backend
                                 winner_result = payload
                                 _send_msg(sat_ctl_send, {"cmd": "cancel", "step": step})
                                 _log(
                                     f"[HYBRID-RACE-WIN] step={step} idx={idx2} R={R2} "
-                                    f"winner={mip_backend} status={m_status} cpu={m_cpu:.6f}s",
+                                    f"winner={mip_backend} status={m_status}",
                                     flush=True,
                                 )
                                 break
@@ -559,13 +553,12 @@ def search_min_radius_hybrid_race(
                     break
 
             if winner_backend == "sat":
-                idx1, R1, s_status, s_cpu, s_nvars, s_nclauses, s_centers = winner_result
+                idx1, R1, s_status, s_nvars, s_nclauses, s_centers = winner_result
                 decided[idx1] = s_status
 
                 if s_status == "sat":
                     best_sat_idx = idx1
                     best_centers = s_centers
-                    best_cpu = s_cpu
                     best_nvars = s_nvars
                     best_nclauses = s_nclauses
                     lo = idx1 + 1
@@ -573,13 +566,12 @@ def search_min_radius_hybrid_race(
                     hi = idx1 - 1
 
             elif winner_backend == mip_backend:
-                idx2, R2, m_status, m_cpu, m_nvars, m_nclauses, m_centers = winner_result
+                idx2, R2, m_status, m_nvars, m_nclauses, m_centers = winner_result
                 decided[idx2] = m_status
 
                 if m_status == "sat":
                     best_sat_idx = idx2
                     best_centers = m_centers
-                    best_cpu = m_cpu
                     best_nvars = m_nvars
                     best_nclauses = m_nclauses
                     lo = idx2 + 1
@@ -588,7 +580,7 @@ def search_min_radius_hybrid_race(
 
             else:
                 search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, None, None, None, None, search_elapsed
+                return "timeout", None, None, None, None, search_elapsed
 
     finally:
         _send_msg(sat_ctl_send, {"cmd": "stop"})
@@ -615,7 +607,7 @@ def search_min_radius_hybrid_race(
 
     if best_sat_idx is None:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     best_radius = radii[best_sat_idx]
     cert_unsat_idx = best_sat_idx + 1
@@ -646,6 +638,5 @@ def search_min_radius_hybrid_race(
         best_nvars,
         best_nclauses,
         best_centers,
-        best_cpu,
         search_elapsed,
     )

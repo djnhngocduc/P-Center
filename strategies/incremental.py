@@ -3,7 +3,7 @@ import threading
 
 from pysat.solvers import Solver
 
-from solvers.backend import EXTERNAL_SOLVERS, cpu_self_seconds
+from solvers.backend import EXTERNAL_SOLVERS
 
 def search_min_radius_incremental(
     inst,
@@ -31,14 +31,13 @@ def search_min_radius_incremental(
     nR = len(radii)
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, None, search_elapsed
+        return "infeasible", None, base_cnf.nv, len(base_cnf.clauses), None, search_elapsed
 
     lo = 0
     hi = nR - 1
 
     best_sat_idx = None
     best_centers = None
-    best_sat_cpu = None
 
     next_var = base_cnf.nv + 1
     tested = {}
@@ -82,13 +81,10 @@ def search_min_radius_incremental(
             )
 
             timer = None
-            cpu0 = None
-            cpu1 = None
             try:
                 if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
                     timer = threading.Timer(time_limit, solver.interrupt)
                     timer.start()
-                    cpu0 = cpu_self_seconds()
                     try:
                         sat = solver.solve_limited(
                             assumptions=[alpha],
@@ -96,25 +92,20 @@ def search_min_radius_incremental(
                         )
                     except NotImplementedError:
                         sat = solver.solve(assumptions=[alpha])
-                    cpu1 = cpu_self_seconds()
                 else:
-                    cpu0 = cpu_self_seconds()
                     sat = solver.solve(assumptions=[alpha])
-                    cpu1 = cpu_self_seconds()
             finally:
                 if timer:
                     timer.cancel()
 
-            cpu_sec = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
-
             if sat is None:
                 decided[mid] = "timeout"
                 print(
-                    f"[INC-DONE] idx={mid} R={R} status=timeout cpu={cpu_sec:.6f}s",
+                    f"[INC-DONE] idx={mid} R={R} status=timeout",
                     flush=True
                 )
                 search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, next_var - 1, None, None, cpu_sec, search_elapsed
+                return "timeout", None, next_var - 1, None, None, search_elapsed
 
             if sat:
                 decided[mid] = "sat"
@@ -124,10 +115,9 @@ def search_min_radius_incremental(
 
                 best_sat_idx = mid
                 best_centers = centers
-                best_sat_cpu = cpu_sec
 
                 print(
-                    f"[INC-DONE] idx={mid} R={R} status=sat cpu={cpu_sec:.6f}s centers={centers}",
+                    f"[INC-DONE] idx={mid} R={R} status=sat centers={centers}",
                     flush=True
                 )
 
@@ -135,7 +125,7 @@ def search_min_radius_incremental(
             else:
                 decided[mid] = "unsat"
                 print(
-                    f"[INC-DONE] idx={mid} R={R} status=unsat cpu={cpu_sec:.6f}s",
+                    f"[INC-DONE] idx={mid} R={R} status=unsat",
                     flush=True
                 )
 
@@ -144,7 +134,7 @@ def search_min_radius_incremental(
     if best_sat_idx is None:
         print("[INC-RESULT] infeasible (no SAT found)", flush=True)
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, next_var - 1, None, None, None, search_elapsed
+        return "infeasible", None, next_var - 1, None, None, search_elapsed
 
     best_radius = radii[best_sat_idx]
     nvars = next_var - 1
@@ -173,7 +163,7 @@ def search_min_radius_incremental(
 
     print(
         f"[INC-RESULT] status={final_status} best_idx={best_sat_idx} "
-        f"best_R={best_radius} cpu={best_sat_cpu}",
+        f"best_R={best_radius}",
         flush=True
     )
 
@@ -184,6 +174,5 @@ def search_min_radius_incremental(
         nvars,
         nclauses,
         best_centers,
-        best_sat_cpu,
         search_elapsed,
     )

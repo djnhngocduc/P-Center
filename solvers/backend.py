@@ -3,7 +3,6 @@ import sys
 import tempfile
 import threading
 import subprocess
-import resource
 
 try:
     import cplex
@@ -38,12 +37,6 @@ EXTERNAL_SOLVERS = {
     )
 }
 
-
-def cpu_self_seconds() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    return float(usage.ru_utime + usage.ru_stime)
-
-
 def write_dimacs(cnf, path):
     nvars = cnf.nv
     nclauses = len(cnf.clauses)
@@ -68,7 +61,7 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
             file=sys.stderr,
             flush=True
         )
-        return "error", 0.0, None
+        return "error", None
 
     base_tmp = tmpdir if tmpdir is not None else ("/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir())
 
@@ -85,13 +78,7 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
     if tmpdir is not None:
         env["TMPDIR"] = tmpdir
 
-    time_bin = "/usr/bin/time"
-    use_time_wrapper = os.path.exists(time_bin) and os.access(time_bin, os.X_OK)
-
-    if use_time_wrapper:
-        cmd = [time_bin, "-p", bin_path] + extra_args + [cnf_path]
-    else:
-        cmd = [bin_path] + extra_args + [cnf_path]
+    cmd = [bin_path] + extra_args + [cnf_path]
 
     proc = subprocess.Popen(
         cmd,
@@ -131,7 +118,7 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
             pass
 
         print(f"[SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        return "timeout", (time_limit if time_limit else 0.0), None
+        return "timeout", None
     finally:
         try:
             if os.path.exists(cnf_path):
@@ -163,25 +150,6 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
                 except ValueError:
                     continue
 
-    cpu_time = None
-    if use_time_wrapper:
-        user_t = None
-        sys_t = None
-        for line in stderr.splitlines():
-            s = line.strip()
-            if s.startswith("user "):
-                try:
-                    user_t = float(s.split()[1])
-                except Exception:
-                    pass
-            elif s.startswith("sys "):
-                try:
-                    sys_t = float(s.split()[1])
-                except Exception:
-                    pass
-        if user_t is not None and sys_t is not None:
-            cpu_time = user_t + sys_t
-
     if status is None:
         if model_lits:
             status = "sat"
@@ -190,9 +158,9 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
 
     if status == "sat" and not model_lits:
         print(f"[SOLVER-WARN] {solver_name} reported SAT but no model.", flush=True)
-        return "error", cpu_time, None
+        return "error", None
 
-    return status, cpu_time, (model_lits if status == "sat" else None)
+    return status, (model_lits if status == "sat" else None)
 
 
 def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_ref=None):
@@ -213,7 +181,7 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
             f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(no coverage)",
             flush=True
         )
-        return idx, radius, "unsat", 0.0, inst.n, 0, None
+        return idx, radius, "unsat", inst.n, 0, None
 
     n = data["n"]
     p = data["p"]
@@ -266,10 +234,7 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
         names=["atmost_p"],
     )
 
-    cpu0 = cpu_self_seconds()
     model.solve()
-    cpu1 = cpu_self_seconds()
-    cpu_sec = cpu1 - cpu0
 
     nvars = model.variables.get_num()
     nclauses = model.linear_constraints.get_num()
@@ -300,41 +265,41 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
         centers = [j for j, v in enumerate(vals) if v > 0.5]
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> SAT(CPLEX) cpu={cpu_sec:.6f}s status={status_name} centers={centers}",
+            f"-> SAT(CPLEX) status={status_name} centers={centers}",
             flush=True
         )
-        return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+        return idx, radius, "sat", nvars, nclauses, centers
 
     if "infeasible" in status_name:
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> UNSAT(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+            f"-> UNSAT(CPLEX) status={status_name}",
             flush=True
         )
-        return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+        return idx, radius, "unsat", nvars, nclauses, None
 
     if ("abort" in status_name) or ("interrupted" in status_name):
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> CANCELLED(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+            f"-> CANCELLED(CPLEX) status={status_name}",
             flush=True
         )
-        return idx, radius, "cancelled", cpu_sec, nvars, nclauses, None
+        return idx, radius, "cancelled", nvars, nclauses, None
 
     if ("time limit" in status_name) or ("limit" in status_name):
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> TIMEOUT(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+            f"-> TIMEOUT(CPLEX) status={status_name}",
             flush=True
         )
-        return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+        return idx, radius, "timeout", nvars, nclauses, None
 
     print(
         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-        f"-> ERROR(CPLEX) cpu={cpu_sec:.6f}s status={status_name}",
+        f"-> ERROR(CPLEX) status={status_name}",
         flush=True
     )
-    return idx, radius, "error", cpu_sec, nvars, nclauses, None
+    return idx, radius, "error", nvars, nclauses, None
 
 
 def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, current_cancel_ref=None):
@@ -353,7 +318,7 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
             f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(GUROBI:no coverage)",
             flush=True
         )
-        return idx, radius, "unsat", 0.0, inst.n, 0, None
+        return idx, radius, "unsat", inst.n, 0, None
 
     n = data["n"]
     p = data["p"]
@@ -361,8 +326,6 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
 
     model = None
     try:
-        cpu0 = cpu_self_seconds()
-
         if env is None:
             model = gp.Model(f"pcenter_feas_R_{radius}")
         else:
@@ -392,9 +355,6 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
 
         model.optimize()
 
-        cpu1 = cpu_self_seconds()
-        cpu_sec = cpu1 - cpu0
-
         nvars = model.NumVars
         nclauses = model.NumConstrs
         status = model.Status
@@ -407,18 +367,18 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
             centers = [j for j in range(n) if x[j].X > 0.5]
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> SAT(GUROBI) cpu={cpu_sec:.6f}s status={status} centers={centers}",
+                f"-> SAT(GUROBI) status={status} centers={centers}",
                 flush=True
             )
-            return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+            return idx, radius, "sat", nvars, nclauses, centers
 
         if status == GRB.INFEASIBLE:
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> UNSAT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+                f"-> UNSAT(GUROBI) status={status}",
                 flush=True
             )
-            return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+            return idx, radius, "unsat", nvars, nclauses, None
 
         if status in (
             GRB.TIME_LIMIT,
@@ -428,25 +388,25 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
         ):
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> TIMEOUT(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+                f"-> TIMEOUT(GUROBI) status={status}",
                 flush=True
             )
-            return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+            return idx, radius, "timeout", nvars, nclauses, None
 
         if status == GRB.INTERRUPTED:
             print(
                 f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> CANCELLED(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+                f"-> CANCELLED(GUROBI) status={status}",
                 flush=True
             )
-            return idx, radius, "cancelled", cpu_sec, nvars, nclauses, None
+            return idx, radius, "cancelled", nvars, nclauses, None
 
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> ERROR(GUROBI) cpu={cpu_sec:.6f}s status={status}",
+            f"-> ERROR(GUROBI) status={status}",
             flush=True
         )
-        return idx, radius, "error", cpu_sec, nvars, nclauses, None
+        return idx, radius, "error", nvars, nclauses, None
 
     finally:
         if current_cancel_ref is not None:
@@ -474,7 +434,7 @@ def solve_radius_cpo(inst, idx, radius, time_limit, data=None):
             f"[WORKER-END] pid={pid} idx={idx} R={radius} -> UNSAT(CPO:no coverage)",
             flush=True
         )
-        return idx, radius, "unsat", 0.0, inst.n, 0, None
+        return idx, radius, "unsat", inst.n, 0, None
 
     n = data["n"]
     p = data["p"]
@@ -502,30 +462,24 @@ def solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     params.SearchType = "Auto"
     params.RandomSeed = 0
 
-    cpu0 = cpu_self_seconds()
     try:
         sol = mdl.solve(params=params)
     except Exception as e:
-        cpu1 = cpu_self_seconds()
-        cpu_sec = cpu1 - cpu0
         print(
-            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> ERROR(CPO) cpu={cpu_sec:.6f}s err={e}",
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> ERROR(CPO) err={e}",
             flush=True
         )
-        return idx, radius, "error", cpu_sec, n, len(cover_rows) + 1, None
-
-    cpu1 = cpu_self_seconds()
-    cpu_sec = cpu1 - cpu0
+        return idx, radius, "error", n, len(cover_rows) + 1, None
 
     nvars = n
     nclauses = len(cover_rows) + 1
 
     if sol is None:
         print(
-            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> TIMEOUT(CPO) cpu={cpu_sec:.6f}s",
+            f"[WORKER-END] pid={pid} idx={idx} R={radius} -> TIMEOUT(CPO)",
             flush=True
         )
-        return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+        return idx, radius, "timeout", nvars, nclauses, None
 
     try:
         solve_status = str(sol.get_solve_status()).lower()
@@ -556,22 +510,22 @@ def solve_radius_cpo(inst, idx, radius, time_limit, data=None):
     if has_solution or ("feasible" in solve_status) or ("optimal" in solve_status):
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> SAT(CPO) cpu={cpu_sec:.6f}s status={solve_status} centers={centers}",
+            f"-> SAT(CPO) status={solve_status} centers={centers}",
             flush=True
         )
-        return idx, radius, "sat", cpu_sec, nvars, nclauses, centers
+        return idx, radius, "sat", nvars, nclauses, centers
 
     if ("infeasible" in solve_status) or ("searchcompleted" in fail_status and not has_solution):
         print(
             f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-            f"-> UNSAT(CPO) cpu={cpu_sec:.6f}s status={solve_status} fail={fail_status}",
+            f"-> UNSAT(CPO) status={solve_status} fail={fail_status}",
             flush=True
         )
-        return idx, radius, "unsat", cpu_sec, nvars, nclauses, None
+        return idx, radius, "unsat", nvars, nclauses, None
 
     print(
         f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-        f"-> TIMEOUT(CPO) cpu={cpu_sec:.6f}s status={solve_status} fail={fail_status}",
+        f"-> TIMEOUT(CPO) status={solve_status} fail={fail_status}",
         flush=True
     )
-    return idx, radius, "timeout", cpu_sec, nvars, nclauses, None
+    return idx, radius, "timeout", nvars, nclauses, None

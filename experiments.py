@@ -50,7 +50,7 @@ def parse_args():
         "--time-limit",
         type=int,
         default=14400,
-        help="Time limit per radius solve (seconds)",
+        help="Total time limit per instance run (seconds)",
     )
     ap.add_argument(
         "--search-mode",
@@ -186,7 +186,6 @@ def run_experiment(
             "run_id": 1,
             "status": prof["status"],
             "best_radius": prof["best_radius"],
-            "cpu": None,
             "load_time": load_time,
             "search_time": prof["search_time"],
             "total_time": load_time + prof["search_time"],
@@ -272,7 +271,7 @@ def run_experiment(
                 elif search_mode == "hybrid_race":
                     extra_kwargs["mip_backend"] = mip_backend
 
-                status, best_radius, nvars, nclauses, centers, best_sat_cpu, search_elapsed = search_fn(
+                status, best_radius, nvars, nclauses, centers, search_elapsed = search_fn(
                     inst,
                     encoding,
                     solver_name,
@@ -285,7 +284,7 @@ def run_experiment(
                 print(
                     f"[RUN-RESULT] instance={inst_desc['name']} run_id={run_id + 1} "
                     f"status={status} best_radius={best_radius} "
-                    f"cpu={best_sat_cpu} load_time={load_time:.6f}s " 
+                    f"load_time={load_time:.6f}s " 
                     f"search_time={search_elapsed:.6f}s total_time={total_time:.6f}s",
                     flush=True
                 )
@@ -301,7 +300,6 @@ def run_experiment(
                         "run_id": run_id + 1,
                         "status": status,
                         "best_radius": best_radius if best_radius is not None else None,
-                        "cpu": best_sat_cpu,
                         "load_time": load_time,
                         "search_time": search_elapsed,
                         "total_time": total_time,
@@ -350,14 +348,6 @@ def print_instance_summary_for_console(all_results_for_inst):
         runs = cfg_runs[(enc, sol, mode)]
         gR = cfg_bestR.get((enc, sol, mode))
 
-        cpus = [
-            x.get("cpu")
-            for x in runs
-            if x.get("status") in ("OK", "uncertified")
-            and x.get("best_radius") == gR
-            and x.get("cpu") is not None
-        ]
-
         loads = [
             x.get("load_time")
             for x in runs
@@ -382,14 +372,13 @@ def print_instance_summary_for_console(all_results_for_inst):
             and x.get("total_time") is not None
         ]
 
-        cpu_str = f"{_stats.mean(cpus):.3f}s" if cpus else "-"
         load_str = f"{_stats.mean(loads):.3f}s" if loads else "-"
         search_str = f"{_stats.mean(searches):.3f}s" if searches else "-"
         total_str = f"{_stats.mean(totals):.3f}s" if totals else "-"
 
         print(
             f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol} mode={mode}: "
-            f"radius={gR} cpu_mean={cpu_str} load_mean={load_str} "
+            f"radius={gR} load_mean={load_str} "
             f"search_mean={search_str} total_mean={total_str}"
         )
 
@@ -433,7 +422,6 @@ def write_paper_table(all_results, out_csv_path: str):
         if k not in global_bestR or R < global_bestR[k]:
             global_bestR[k] = R
 
-    cpus_at_global = defaultdict(list)
     load_times_at_global = defaultdict(list)
     search_times_at_global = defaultdict(list)
     total_times_at_global = defaultdict(list)
@@ -452,10 +440,6 @@ def write_paper_table(all_results, out_csv_path: str):
             key_size = (inst, n, p, enc, sol, mode)
             if key_size not in sizes_at_global:
                 sizes_at_global[key_size] = (x.get("nvars"), x.get("nclauses"))
-
-            cpu_v = x.get("cpu")
-            if cpu_v is not None:
-                cpus_at_global[(inst, n, p, enc, sol, mode)].append(cpu_v)
 
             load_v = x.get("load_time")
             if load_v is not None:
@@ -478,14 +462,12 @@ def write_paper_table(all_results, out_csv_path: str):
         header.append(f"{m} radius")
         header.append(f"{m} #vars")
         header.append(f"{m} #clauses")
-        header.append(f"{m} cpu")
         header.append(f"{m} load")
         header.append(f"{m} search")
         header.append(f"{m} total")
 
     rows = []
 
-    solved_cpu = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
     solved_load = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
     solved_search = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
     solved_total = {method_label(sol, enc, mode): [] for (enc, sol, mode) in method_cols}
@@ -503,7 +485,6 @@ def write_paper_table(all_results, out_csv_path: str):
             radius_col = f"{m} radius"
             vars_col = f"{m} #vars"
             clauses_col = f"{m} #clauses"
-            cpu_col = f"{m} cpu"
             load_col = f"{m} load"
             search_col = f"{m} search"
             total_col = f"{m} total"
@@ -514,14 +495,6 @@ def write_paper_table(all_results, out_csv_path: str):
             nv, nc = sizes_at_global.get((inst, n, p, enc, sol, mode), ("-", "-"))
             row[vars_col] = nv
             row[clauses_col] = nc
-
-            ts_cpu = cpus_at_global.get((inst, n, p, enc, sol, mode), [])
-            if ts_cpu:
-                mean_cpu = _stats.mean(ts_cpu)
-                row[cpu_col] = f"{mean_cpu:.3f}"
-                solved_cpu[m].append(mean_cpu)
-            else:
-                row[cpu_col] = "-"
 
             ts_load = load_times_at_global.get((inst, n, p, enc, sol, mode), [])
             if ts_load:
@@ -558,7 +531,6 @@ def write_paper_table(all_results, out_csv_path: str):
         radius_col = f"{m} radius"
         vars_col = f"{m} #vars"
         clauses_col = f"{m} #clauses"
-        cpu_col = f"{m} cpu"
         load_col = f"{m} load"
         search_col = f"{m} search"
         total_col = f"{m} total"
@@ -570,13 +542,9 @@ def write_paper_table(all_results, out_csv_path: str):
         footer_avg[vars_col] = ""
         footer_avg[clauses_col] = ""
 
-        lst_cpu = solved_cpu.get(m, [])
         lst_load = solved_load.get(m, [])
         lst_search = solved_search.get(m, [])
         lst_total = solved_total.get(m, [])
-
-        footer_num[cpu_col] = str(len(lst_cpu)) if lst_cpu else "0"
-        footer_avg[cpu_col] = f"{_stats.mean(lst_cpu):.3f}" if lst_cpu else "-"
 
         footer_num[load_col] = str(len(lst_load)) if lst_load else "0"
         footer_avg[load_col] = f"{_stats.mean(lst_load):.3f}" if lst_load else "-"

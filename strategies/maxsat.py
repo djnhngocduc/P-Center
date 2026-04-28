@@ -7,12 +7,9 @@ import traceback
 import multiprocessing as mp
 import threading
 from typing import Optional, Tuple, List
-import resource
 
 from pysat.formula import WCNF
 from pysat.examples.rc2 import RC2
-
-from solvers.backend import cpu_self_seconds
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,37 +23,6 @@ EXTERNAL_MAXSAT_SOLVERS = {
         []
     ),
 }
-
-
-def _cpu_children_seconds() -> float:
-    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return float(usage.ru_utime + usage.ru_stime)
-
-
-def _extract_time_wrapper_cpu(stderr_text: str):
-    if not stderr_text:
-        return None
-
-    user_t = None
-    sys_t = None
-
-    for line in stderr_text.splitlines():
-        s = line.strip()
-        if s.startswith("user "):
-            try:
-                user_t = float(s.split()[1])
-            except Exception:
-                pass
-        elif s.startswith("sys "):
-            try:
-                sys_t = float(s.split()[1])
-            except Exception:
-                pass
-
-    if user_t is not None and sys_t is not None:
-        return user_t + sys_t
-
-    return None
 
 def _run_external_maxsat_solver(
     solver_name,
@@ -74,7 +40,7 @@ def _run_external_maxsat_solver(
             file=sys.stderr,
             flush=True,
         )
-        return "error", None, [], 0.0
+        return "error", None, []
 
     base_tmp = tmpdir if tmpdir is not None else (
         "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
@@ -93,17 +59,9 @@ def _run_external_maxsat_solver(
     if tmpdir is not None:
         env["TMPDIR"] = tmpdir
 
-    time_bin = "/usr/bin/time"
-    use_time_wrapper = os.path.exists(time_bin) and os.access(time_bin, os.X_OK)
-
     solver_args = extra_args + [wcnf_path]
+    cmd = [bin_path] + solver_args
 
-    if use_time_wrapper:
-        cmd = [time_bin, "-p", bin_path] + solver_args
-    else:
-        cmd = [bin_path] + solver_args
-
-    child_cpu0 = _cpu_children_seconds()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -142,10 +100,7 @@ def _run_external_maxsat_solver(
             stdout, stderr = "", ""
 
         print(f"[MAXSAT-SOLVER-TIMEOUT] solver={solver_name} cmd={cmd}", flush=True)
-        cpu_time = _extract_time_wrapper_cpu(stderr or "")
-        if cpu_time is None:
-            cpu_time = max(0.0, _cpu_children_seconds() - child_cpu0)
-        return "timeout", None, [], cpu_time
+        return "timeout", None, []
 
     finally:
         try:
@@ -155,11 +110,6 @@ def _run_external_maxsat_solver(
             pass
 
     status, cost, model = _parse_maxsat_model(stdout or "")
-
-    cpu_time = _extract_time_wrapper_cpu(stderr or "") if use_time_wrapper else None
-
-    if cpu_time is None:
-        cpu_time = max(0.0, _cpu_children_seconds() - child_cpu0)
 
     if status == "error" and proc.returncode not in (0, 10, 20, 30):
         print(
@@ -175,9 +125,9 @@ def _run_external_maxsat_solver(
             f"[MAXSAT-SOLVER-WARN] {solver_name} reported {status} but no model.",
             flush=True,
         )
-        return "error", cost, [], cpu_time
+        return "error", cost, []
 
-    return status, cost, model, cpu_time
+    return status, cost, model
 
 def _write_wcnf(wcnf, path: str) -> None:
     hard = list(getattr(wcnf, "hard", []))
@@ -267,22 +217,18 @@ def _pysat_maxsat_worker(wcnf_data, solver_name, send_conn):
 
         if solver_name in PYSAT_MAXSAT_SOLVERS:
             with RC2(wcnf) as solver:
-                cpu0 = cpu_self_seconds()
                 model = solver.compute()
-                cpu1 = cpu_self_seconds()
                 cost = solver.cost
         else:
             raise ValueError(f"Unsupported PySAT MaxSAT solver: {solver_name}")
 
-        cpu = (cpu1 - cpu0) if (cpu0 is not None and cpu1 is not None) else 0.0
-
         if model is None:
-            send_conn.send(("error", cost, [], cpu))
+            send_conn.send(("error", cost, []))
         else:
-            send_conn.send(("optimum", cost, model, cpu))
+            send_conn.send(("optimum", cost, model))
 
     except Exception:
-        send_conn.send(("error", None, [], 0.0, traceback.format_exc()))
+        send_conn.send(("error", None, [], traceback.format_exc()))
 
     finally:
         try:
@@ -327,7 +273,6 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         daemon=True,
     )
 
-    child_cpu0 = _cpu_children_seconds()
     proc.start()
 
     try:
@@ -343,27 +288,24 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
         else:
             if not recv_conn.poll(timeout):
                 _terminate_process_fast(proc)
-                cpu = max(0.0, _cpu_children_seconds() - child_cpu0)
-                return "timeout", None, [], cpu
+                return "timeout", None, []
 
             msg = recv_conn.recv()
 
         proc.join(timeout=0.2)
 
         if not msg:
-            cpu = max(0.0, _cpu_children_seconds() - child_cpu0)
-            return "error", None, [], cpu
+            return "error", None, []
 
-        status, cost, model, cpu, *rest = msg
+        status, cost, model, *rest = msg
 
         if status == "error" and rest:
             print(rest[0], file=sys.stderr, flush=True)
 
-        return status, cost, model, cpu
+        return status, cost, model
 
     except EOFError:
-        cpu = max(0.0, _cpu_children_seconds() - child_cpu0)
-        return "error", None, [], cpu
+        return "error", None, []
 
     finally:
         _terminate_process_fast(proc)
@@ -418,7 +360,7 @@ def search_min_radius_maxsat(
 
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     lo = 0
     hi = nR - 1
@@ -428,11 +370,9 @@ def search_min_radius_maxsat(
     best_centers = None
     best_nvars = None
     best_nclauses = None
-    best_cpu = None
 
     last_nvars = None
     last_nclauses = None
-    last_cpu = None
 
     decided = {}
 
@@ -449,7 +389,6 @@ def search_min_radius_maxsat(
                     best_nvars,
                     best_nclauses,
                     best_centers,
-                    best_cpu,
                     search_elapsed,
                 )
             return (
@@ -458,7 +397,6 @@ def search_min_radius_maxsat(
                 last_nvars,
                 last_nclauses,
                 None,
-                last_cpu,
                 search_elapsed,
             )
 
@@ -466,11 +404,10 @@ def search_min_radius_maxsat(
 
         if wcnf is None:
             decided[mid] = "unsat"
-            last_cpu = 0.0
             hi = mid - 1
             continue
 
-        status, cost, model, cpu_sec = _solve_wcnf(
+        status, cost, model = _solve_wcnf(
             wcnf,
             solver_name,
             time_limit,
@@ -478,7 +415,6 @@ def search_min_radius_maxsat(
 
         last_nvars = wcnf.nv
         last_nclauses = len(wcnf.hard) + len(wcnf.soft)
-        last_cpu = cpu_sec
 
         if status not in ("optimum", "sat"):
             decided[mid] = status
@@ -491,7 +427,6 @@ def search_min_radius_maxsat(
                     best_nvars,
                     best_nclauses,
                     best_centers,
-                    best_cpu,
                     search_elapsed,
                 )
 
@@ -502,7 +437,6 @@ def search_min_radius_maxsat(
                 last_nvars,
                 last_nclauses,
                 None if best_sat_idx is None else best_centers,
-                last_cpu,
                 search_elapsed,
             )
 
@@ -519,7 +453,6 @@ def search_min_radius_maxsat(
             best_centers = centers
             best_nvars = last_nvars
             best_nclauses = last_nclauses
-            best_cpu = last_cpu
 
             lo = mid + 1
         else:
@@ -534,7 +467,6 @@ def search_min_radius_maxsat(
             last_nvars,
             last_nclauses,
             None,
-            last_cpu,
             search_elapsed,
         )
 
@@ -566,6 +498,5 @@ def search_min_radius_maxsat(
         best_nvars,
         best_nclauses,
         best_centers,
-        best_cpu,
         search_elapsed,
     )

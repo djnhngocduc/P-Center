@@ -6,7 +6,6 @@ import statistics as _stats
 
 from solvers.backend import (
     EXTERNAL_SOLVERS,
-    cpu_self_seconds,
     solve_radius_gurobi,
     solve_radius_cplex,
 )
@@ -23,7 +22,6 @@ try:
     import gurobipy as gp
 except Exception:
     gp = None
-
 
 def _check_mip_backend_available(mip_backend: str):
     if mip_backend == "cplex_mip":
@@ -151,18 +149,14 @@ def profile_threshold_sat_vs_mip(
             )
 
             sat_timer = None
-            sat_cpu0 = None
-            sat_cpu1 = None
             sat_wall0 = time.perf_counter()
             sat_status = "error"
-            sat_cpu = 0.0
             sat_centers = None
 
             try:
                 if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
                     sat_timer = threading.Timer(time_limit, solver.interrupt)
                     sat_timer.start()
-                    sat_cpu0 = cpu_self_seconds()
                     try:
                         sat_res = solver.solve_limited(
                             assumptions=[alpha],
@@ -170,17 +164,13 @@ def profile_threshold_sat_vs_mip(
                         )
                     except NotImplementedError:
                         sat_res = solver.solve(assumptions=[alpha])
-                    sat_cpu1 = cpu_self_seconds()
                 else:
-                    sat_cpu0 = cpu_self_seconds()
                     sat_res = solver.solve(assumptions=[alpha])
-                    sat_cpu1 = cpu_self_seconds()
             finally:
                 if sat_timer:
                     sat_timer.cancel()
 
             sat_wall = time.perf_counter() - sat_wall0
-            sat_cpu = (sat_cpu1 - sat_cpu0) if (sat_cpu0 is not None and sat_cpu1 is not None) else 0.0
 
             if sat_res is None:
                 sat_status = "timeout"
@@ -193,7 +183,7 @@ def profile_threshold_sat_vs_mip(
                 sat_status = "unsat"
 
             mip_wall0 = time.perf_counter()
-            m_idx, m_R, mip_status, mip_cpu, mip_nvars, mip_nclauses, mip_centers = _solve_radius_mip(
+            m_idx, m_R, mip_status, mip_nvars, mip_nclauses, mip_centers = _solve_radius_mip(
                 inst=inst,
                 idx=mid,
                 radius=R,
@@ -234,11 +224,9 @@ def profile_threshold_sat_vs_mip(
                 "remaining_iters": remaining_iters,
                 "sat_status": sat_status,
                 "sat_wall": sat_wall,
-                "sat_cpu": sat_cpu,
                 "sat_centers": json.dumps(sat_centers if sat_centers is not None else []),
                 "mip_status": mip_status,
                 "mip_wall": mip_wall,
-                "mip_cpu": mip_cpu,
                 "mip_centers": json.dumps(mip_centers if mip_centers is not None else []),
                 "winner": winner,
                 "status_mismatch": int(status_mismatch),
@@ -248,8 +236,8 @@ def profile_threshold_sat_vs_mip(
             print(
                 f"[THRESHOLD-DONE] step={step_no} idx={mid} R={R} "
                 f"remaining_iters={remaining_iters} "
-                f"SAT=({sat_status}, wall={sat_wall:.6f}s, cpu={sat_cpu:.6f}s) "
-                f"{mip_backend}=({mip_status}, wall={mip_wall:.6f}s, cpu={mip_cpu:.6f}s) "
+                f"SAT=({sat_status}, wall={sat_wall:.6f}s) "
+                f"{mip_backend}=({mip_status}, wall={mip_wall:.6f}s) "
                 f"winner={winner}",
                 flush=True
             )
@@ -327,8 +315,6 @@ def profile_threshold_sat_vs_mip(
 
         sat_wall_vals = [float(r["sat_wall"]) for r in rows_k]
         mip_wall_vals = [float(r["mip_wall"]) for r in rows_k]
-        sat_cpu_vals = [float(r["sat_cpu"]) for r in rows_k]
-        mip_cpu_vals = [float(r["mip_cpu"]) for r in rows_k]
 
         summary_rows.append({
             "instance": instance_name,
@@ -344,8 +330,6 @@ def profile_threshold_sat_vs_mip(
             "mip_wall_mean": _stats.mean(mip_wall_vals) if mip_wall_vals else None,
             "sat_wall_median": _stats.median(sat_wall_vals) if sat_wall_vals else None,
             "mip_wall_median": _stats.median(mip_wall_vals) if mip_wall_vals else None,
-            "sat_cpu_mean": _stats.mean(sat_cpu_vals) if sat_cpu_vals else None,
-            "mip_cpu_mean": _stats.mean(mip_cpu_vals) if mip_cpu_vals else None,
             "mismatches": mismatches,
         })
 
@@ -412,11 +396,9 @@ def profile_threshold_sat_vs_mip(
                 "remaining_iters",
                 "sat_status",
                 "sat_wall",
-                "sat_cpu",
                 "sat_centers",
                 "mip_status",
                 "mip_wall",
-                "mip_cpu",
                 "mip_centers",
                 "winner",
                 "status_mismatch",
@@ -443,8 +425,6 @@ def profile_threshold_sat_vs_mip(
                 "mip_wall_mean",
                 "sat_wall_median",
                 "mip_wall_median",
-                "sat_cpu_mean",
-                "mip_cpu_mean",
                 "mismatches",
                 "threshold",
                 "policy",

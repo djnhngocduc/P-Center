@@ -22,11 +22,10 @@ def search_min_radius_parallel(
     nR = len(radii)
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     decided = {}
     sat_solutions = {}
-    sat_cpu_time = {}
     sat_nvars = {}
     sat_nclauses = {}
 
@@ -86,7 +85,7 @@ def search_min_radius_parallel(
             for fut in as_completed(futs):
                 k = futs[fut]
                 try:
-                    idx, R, status, cpu_sec, nvars, nclauses, centers = fut.result()
+                    idx, R, status, nvars, nclauses, centers = fut.result()
                 except Exception:
                     tb = traceback.format_exc()
                     print(
@@ -95,10 +94,8 @@ def search_min_radius_parallel(
                         flush=True,
                     )
                     idx, R = k, radii[k]
-                    status, cpu_sec, nvars, nclauses, centers = (
+                    status, nvars, nclauses, centers = (
                         "error",
-                        0.0,
-                        None,
                         None,
                         None,
                         None,
@@ -106,7 +103,7 @@ def search_min_radius_parallel(
 
                 print(
                     f"[TASK-DONE] idx={idx} R={R} status={status} "
-                    f"cpu={cpu_sec:.6f}s",
+                    f"nvars={nvars} nclauses={nclauses}",
                     flush=True
                 )
 
@@ -114,7 +111,6 @@ def search_min_radius_parallel(
 
                 if status == "sat":
                     sat_solutions[idx] = centers
-                    sat_cpu_time[idx] = cpu_sec
                     sat_nvars[idx] = nvars
                     sat_nclauses[idx] = nclauses
 
@@ -162,21 +158,18 @@ def search_min_radius_parallel(
                     futs2 = launch_batch(ex, [nxt])
                     fut2 = next(iter(futs2.keys()))
                     try:
-                        idx2, R2, status2, cpu_sec2, nv2, nc2, centers2 = fut2.result()
+                        idx2, R2, status2, nv2, nc2, centers2 = fut2.result()
                     except Exception:
                         idx2, R2 = nxt, radii[nxt]
-                        status2, cpu_sec2, nv2, nc2, centers2 = (
+                        status2, nv2, nc2, centers2 = (
                             "error",
-                            0.0,
-                            None,
                             None,
                             None,
                             None,
                         )
 
                     print(
-                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2} "
-                        f"cpu={cpu_sec2:.6f}s",
+                        f"[REFINE-DONE] idx={idx2} R={R2} status={status2}",
                         flush=True
                     )
 
@@ -188,7 +181,6 @@ def search_min_radius_parallel(
 
                     elif status2 == "sat":
                         sat_solutions[nxt] = centers2
-                        sat_cpu_time[nxt] = cpu_sec2
                         sat_nvars[nxt] = nv2
                         sat_nclauses[nxt] = nc2
 
@@ -230,10 +222,9 @@ def search_min_radius_parallel(
                 flush=True
             )
             search_elapsed = time.perf_counter() - search_t0
-            return "infeasible", None, None, None, None, None, search_elapsed
+            return "infeasible", None, None, None, None, search_elapsed
 
     best_centers = sat_solutions.get(best_sat_idx, None)
-    best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
     best_nvars = sat_nvars.get(best_sat_idx, None)
     best_nclauses = sat_nclauses.get(best_sat_idx, None)
 
@@ -261,7 +252,7 @@ def search_min_radius_parallel(
 
     print(
         f"[PARALLEL-RESULT] status={final_status} best_idx={best_sat_idx} "
-        f"best_R={radii[best_sat_idx]} cpu={best_sat_cpu}",
+        f"best_R={radii[best_sat_idx]}",
         flush=True
     )
 
@@ -272,7 +263,6 @@ def search_min_radius_parallel(
         best_nvars,
         best_nclauses,
         best_centers,
-        best_sat_cpu,
         search_elapsed
     )
 
@@ -294,11 +284,10 @@ def search_min_radius_binary(
     nR = len(radii)
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     best_sat_idx = None
     best_centers = None
-    best_sat_cpu = None
     best_nvars = None
     best_nclauses = None
 
@@ -346,7 +335,7 @@ def search_min_radius_binary(
             )
 
             try:
-                idx, Rret, status, cpu_sec, nvars, nclauses, centers = fut.result()
+                idx, Rret, status, nvars, nclauses, centers = fut.result()
             except Exception:
                 tb = traceback.format_exc()
                 print(
@@ -355,10 +344,8 @@ def search_min_radius_binary(
                     flush=True,
                 )
                 idx, Rret = mid, R
-                status, cpu_sec, nvars, nclauses, centers = (
+                status, nvars, nclauses, centers = (
                     "error",
-                    0.0,
-                    None,
                     None,
                     None,
                     None,
@@ -368,14 +355,13 @@ def search_min_radius_binary(
 
             print(
                 f"[BINARY-DONE] idx={idx} R={Rret} status={status} "
-                f"cpu={cpu_sec:.6f}s nvars={nvars} nclauses={nclauses}",
+                f"nvars={nvars} nclauses={nclauses}",
                 flush=True
             )
 
             if status == "sat":
                 best_sat_idx = idx
                 best_centers = centers
-                best_sat_cpu = cpu_sec
                 best_nvars = nvars
                 best_nclauses = nclauses
 
@@ -411,17 +397,16 @@ def search_min_radius_binary(
                         best_nvars,
                         best_nclauses,
                         best_centers,
-                        best_sat_cpu,
                         search_elapsed,
                     )
 
                 search_elapsed = time.perf_counter() - search_t0
-                return status, None, nvars, nclauses, None, cpu_sec, search_elapsed
+                return status, None, nvars, nclauses, None, search_elapsed
 
     if best_sat_idx is None:
         print("[BINARY-RESULT] infeasible (no SAT found)", flush=True)
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     cert_unsat_idx = best_sat_idx + 1
     certified = (
@@ -447,7 +432,7 @@ def search_min_radius_binary(
 
     print(
         f"[BINARY-RESULT] status={final_status} best_idx={best_sat_idx} "
-        f"best_R={radii[best_sat_idx]} cpu={best_sat_cpu}",
+        f"best_R={radii[best_sat_idx]}",
         flush=True
     )
 
@@ -458,7 +443,6 @@ def search_min_radius_binary(
         best_nvars,
         best_nclauses,
         best_centers,
-        best_sat_cpu,
         search_elapsed,
     )
 
@@ -480,7 +464,7 @@ def search_min_radius_kary(
     nR = len(radii)
     if nR == 0:
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     k = max(1, int(radii_workers))
 
@@ -488,7 +472,6 @@ def search_min_radius_kary(
     best_unsat_idx = None
 
     sat_solutions = {}
-    sat_cpu_time = {}
     sat_nvars = {}
     sat_nclauses = {}
 
@@ -609,7 +592,7 @@ def search_min_radius_kary(
             for fut in as_completed(futs):
                 idx0 = futs[fut]
                 try:
-                    idx, R, status, cpu_sec, nvars, nclauses, centers = fut.result()
+                    idx, R, status, nvars, nclauses, centers = fut.result()
                 except Exception:
                     tb = traceback.format_exc()
                     print(
@@ -618,10 +601,8 @@ def search_min_radius_kary(
                         flush=True,
                     )
                     idx, R = idx0, radii[idx0]
-                    status, cpu_sec, nvars, nclauses, centers = (
+                    status, nvars, nclauses, centers = (
                         "error",
-                        0.0,
-                        None,
                         None,
                         None,
                         None,
@@ -629,7 +610,7 @@ def search_min_radius_kary(
 
                 print(
                     f"[KARY-DONE] idx={idx} R={R} status={status} "
-                    f"cpu={cpu_sec:.6f}s nvars={nvars} nclauses={nclauses}",
+                    f"nvars={nvars} nclauses={nclauses}",
                     flush=True
                 )
 
@@ -638,7 +619,6 @@ def search_min_radius_kary(
                 if status == "sat":
                     batch_sat.append(idx)
                     sat_solutions[idx] = centers
-                    sat_cpu_time[idx] = cpu_sec
                     sat_nvars[idx] = nvars
                     sat_nclauses[idx] = nclauses
 
@@ -689,10 +669,9 @@ def search_min_radius_kary(
     if best_sat_idx is None:
         print("[KARY-RESULT] infeasible (no SAT found)", flush=True)
         search_elapsed = time.perf_counter() - search_t0
-        return "infeasible", None, None, None, None, None, search_elapsed
+        return "infeasible", None, None, None, None, search_elapsed
 
     best_centers = sat_solutions.get(best_sat_idx, None)
-    best_sat_cpu = sat_cpu_time.get(best_sat_idx, None)
     best_nvars = sat_nvars.get(best_sat_idx, None)
     best_nclauses = sat_nclauses.get(best_sat_idx, None)
 
@@ -720,7 +699,7 @@ def search_min_radius_kary(
 
     print(
         f"[KARY-RESULT] status={final_status} best_idx={best_sat_idx} "
-        f"best_R={radii[best_sat_idx]} cpu={best_sat_cpu}",
+        f"best_R={radii[best_sat_idx]}",
         flush=True
     )
 
@@ -731,6 +710,5 @@ def search_min_radius_kary(
         best_nvars,
         best_nclauses,
         best_centers,
-        best_sat_cpu,
         search_elapsed,
     )
