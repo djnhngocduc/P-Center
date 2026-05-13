@@ -26,7 +26,6 @@ class PCenterSAT:
         self._incremental_cover_order = None
 
     def _y(self, j: int) -> int:
-        # 1..n
         return 1 + j
 
     @staticmethod
@@ -131,21 +130,6 @@ class PCenterSAT:
         return cnf, info
     
     def _encode_wcnf_maxsat_setcover(self, radius: float):
-        """
-        Build a weighted partial MaxSAT model for one radius.
-
-        Set-covering MaxSAT formulation:
-        - hard clauses: coverage constraints for the tested radius R
-        - soft clauses: (-y_j) for each candidate center j, weight 1
-
-        The MaxSAT optimum cost is exactly the minimum number of selected centers
-        needed to cover all nodes within radius R. Therefore, R is feasible for the
-        p-Center problem iff optimum_cost <= p.
-
-        This keeps the same center variables and coverage clauses as the SAT
-        feasibility encoding, but moves the center-count constraint into the MaxSAT
-        objective instead of encoding it as hard NSC.
-        """
         wcnf = WCNF()
 
         active_demands = list(range(self.n))
@@ -153,8 +137,6 @@ class PCenterSAT:
 
         self._prepare_incremental_cover_order()
 
-        # Hard coverage clauses:
-        # For every demand u, at least one center within radius must be selected.
         for u in active_demands:
             allowed = []
             for dcu, c in self._incremental_cover_order[u]:
@@ -168,8 +150,6 @@ class PCenterSAT:
 
             wcnf.append(allowed)
 
-        # Soft clauses:
-        # Penalize every selected center. If y_j is true, (-y_j) is violated.
         for j in candidates:
             wcnf.append([-self.y_lit_all[j]], weight=1)
 
@@ -188,12 +168,6 @@ class PCenterSAT:
         return wcnf, info
 
     def _build_setcover_data(self, radius: float):
-        """
-        Build the direct set-covering feasibility data for one radius.
-        This is used by the CPLEX backend and deliberately avoids CNF.
-
-        Returns None if some demand cannot be covered at this radius.
-        """
         active_demands = list(range(self.n))
         candidates = list(range(self.n))
 
@@ -247,29 +221,21 @@ class PCenterSAT:
             next_var += 1
             return v
 
-        # --- Tạo ma trận R_{i,j} ---
-        # R[i][j] ~ "sau khi xem lits[0..i] đã có ít nhất (j+1) biến TRUE"
-        # độ dài hàng i: min(k, i+1)
-        # chỉ tạo cho i = 0 .. n-1
         R = []
         for i in range(n - 1):
             row_len = min(i + 1, k)
             row = [new_var() for _ in range(row_len)]
             R.append(row)
 
-        # --- (1) X_i -> R_{i,1}  ===  (¬X_i ∨ R_{i,0})
         for i in range(1, n):
             cnf.append([-lits[i-1], R[i-1][0]])
 
-        # --- (2) R_{i-1,j} -> R_{i,j}  ===  (¬R_{i-1,j} ∨ R_{i,j})
         for i in range(2, n):
             prev = R[i-2]
             curr = R[i-1]
             for j in range(len(prev)):
                 cnf.append([-prev[j], curr[j]])
 
-        # --- (3) (X_i ∧ R_{i-1,j-1}) -> R_{i,j}
-        # === (¬X_i ∨ ¬R_{i-1,j-1} ∨ R_{i,j})
         for i in range(2, n):
             prev = R[i-2]
             curr = R[i-1]
@@ -280,8 +246,6 @@ class PCenterSAT:
                     curr[j]
                 ])
 
-
-        # --- (8) X_i -> ¬R_{i-1,k} === (¬X_i ∨ ¬R_{i-1,k-1})
         for i in range(k + 1, n + 1):
             cnf.append([
                 -lits[i-1],
@@ -322,10 +286,6 @@ class PCenterSAT:
         cnf.nv = max(getattr(cnf, "nv", 0), int(max_var))
     
     def _prepare_incremental_cover_order(self):
-        """
-        Precompute, for each demand u, the centers c sorted by distance dist[c][u].
-        Since reduction is OFF, candidates = all vertices and active_demands = all vertices.
-        """
         if self._incremental_cover_order is not None:
             return
 
@@ -340,12 +300,6 @@ class PCenterSAT:
         self._incremental_cover_order = cover_order
 
     def _build_incremental_base_cnf(self, encoding: str):
-        """
-        Build the permanent part of incremental SAT:
-          - y variables
-          - one global AtMost-p over all y
-        No coverage clauses here.
-        """
         cnf = CNF()
 
         candidates = list(range(self.n))
@@ -416,15 +370,6 @@ class PCenterSAT:
         return cnf, info
 
     def _build_incremental_guarded_clauses(self, radius: float, selector_lit: int):
-        """
-        Build guarded coverage clauses for ONE radius:
-            (-selector_lit OR y_c1 OR y_c2 OR ...)
-        using precomputed sorted cover order.
-
-        This matches the repo idea you sent:
-          - AtMost is permanent
-          - coverage is added lazily per tested radius
-        """
         self._prepare_incremental_cover_order()
 
         clauses = []

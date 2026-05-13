@@ -9,8 +9,6 @@ import csv
 import traceback
 
 from strategies.hybrid_race import search_min_radius_hybrid_race
-from strategies.hybrid_threshold import search_min_radius_hybrid_threshold
-from strategies.profile_threshold import profile_threshold_sat_vs_mip
 
 from utils.instances import (
     load_instance_data,
@@ -56,15 +54,15 @@ def parse_args():
         "--search-mode",
         type=str,
         default="parallel",
-        choices=["parallel", "binary", "kary", "incremental", "threshold_profile", "hybrid_threshold", "hybrid_race", "maxsat"],
-        help="Search strategy: parallel, binary, or kary, or incremental, or threshold_profile, or hybrid_threshold, or hybrid_race, or maxsat",
+        choices=["parallel", "binary", "kary", "incremental", "hybrid_race", "maxsat"],
+        help="Search strategy: parallel, binary, kary, incremental, hybrid_race, or maxsat",
     )
     ap.add_argument(
         "--mip-backend",
         type=str,
         default="cplex_mip",
         choices=["cplex_mip", "gurobi_mip"],
-        help="MIP backend used internally by hybrid_race, hybrid_threshold, and threshold_profile: cplex_mip or gurobi_mip",
+        help="MIP backend used internally by hybrid_race: cplex_mip or gurobi_mip",
     )
     ap.add_argument(
         "--radii-workers",
@@ -78,24 +76,6 @@ def parse_args():
         default=os.path.join("results", "results.csv"),
         help="CSV output path",
     )
-    ap.add_argument(
-        "--threshold-detail-out",
-        type=str,
-        default=os.path.join("results", "threshold_detail.csv"),
-        help="CSV output for per-subproblem threshold profiling details.",
-    )
-    ap.add_argument(
-        "--threshold-summary-out",
-        type=str,
-        default=os.path.join("results", "threshold_summary.csv"),
-        help="CSV output for threshold summary and best threshold candidates.",
-    )
-    ap.add_argument(
-        "--hybrid-threshold",
-        type=int,
-        default=11,
-        help="Use SAT if remaining_iters > threshold, else use the selected MIP backend (default threshold: 11).",
-    )
     return ap.parse_args()
 
 def run_experiment(
@@ -106,15 +86,12 @@ def run_experiment(
     search_mode,
     radii_workers,
     *,
-    hybrid_threshold=11,
     mip_backend="cplex_mip",
     mgr,
     cancel_dict,
-    threshold_detail_out=None,
-    threshold_summary_out=None,
 ):
-    if "cplex_mip" in solvers and search_mode not in ("binary", "threshold_profile", "hybrid_threshold", "hybrid_race"):
-        raise ValueError("CPLEX backend currently supports only binary search, threshold_profile, or hybrid_threshold, or hybrid_race.")
+    if "cplex_mip" in solvers and search_mode not in ("binary", "hybrid_race"):
+        raise ValueError("CPLEX backend currently supports only binary search or hybrid_race.")
     if "cplex_cp" in solvers and search_mode not in ("parallel", "binary", "kary"):
         raise ValueError("CPO backend currently supports only parallel, binary, or kary search.")
     if "gurobi_mip" in solvers and search_mode not in ("parallel", "binary", "kary"):
@@ -133,78 +110,6 @@ def run_experiment(
         f"p={inst.p} n={inst.n} load_time={load_time:.6f}s",
         flush=True
     )
-
-    if search_mode == "threshold_profile":
-        sat_solvers = [s for s in solvers if s not in ("cplex_mip", "gurobi_mip", "cplex_cp")]
-        if len(sat_solvers) != 1:
-            raise ValueError(
-                "threshold_profile expects exactly one SAT solver plus the selected MIP backend. "
-                f"Got SAT solvers={sat_solvers}"
-            )
-        if len(encodings) != 1:
-            raise ValueError(
-                "threshold_profile expects exactly one encoding. "
-                f"Got encodings={encodings}"
-            )
-
-        sat_solver = sat_solvers[0]
-        encoding = encodings[0]
-
-        print(
-            f"[RUN-THRESHOLD] instance={inst_desc['name']} "
-            f"encoding={encoding} sat_solver={sat_solver}",
-            flush=True
-        )
-
-        prof = profile_threshold_sat_vs_mip(
-            inst,
-            encoding,
-            sat_solver,
-            time_limit,
-            mip_backend=mip_backend,
-            instance_name=inst_desc["name"],
-            detail_out=threshold_detail_out,
-            summary_out=threshold_summary_out,
-        )
-
-        print(
-            f"[RUN-THRESHOLD-RESULT] instance={inst_desc['name']} "
-            f"status={prof['status']} best_radius={prof['best_radius']} "
-            f"best_threshold={prof['best_threshold']} "
-            f"best_threshold_total_wall={prof['best_threshold_total_wall']} "
-            f"search_time={prof['search_time']:.6f}s",
-            flush=True
-        )
-
-        return [{
-            "instance": inst_desc["name"],
-            "n": inst.n,
-            "p": inst.p,
-            "encoding": encoding,
-            "solver": f"{sat_solver}+{mip_backend}",
-            "search_mode": "threshold_profile",
-            "run_id": 1,
-            "status": prof["status"],
-            "best_radius": prof["best_radius"],
-            "load_time": load_time,
-            "search_time": prof["search_time"],
-            "total_time": load_time + prof["search_time"],
-            "nvars": None,
-            "nclauses": None,
-            "centers": json.dumps([]),
-        }]
-
-    if search_mode == "hybrid_threshold":
-        if len(solvers) != 1:
-            raise ValueError(
-                "hybrid_threshold expects exactly one SAT solver in --solvers. "
-                "Do not include cplex_mip here because CPLEX is used internally."
-            )
-        if solvers[0] in ("cplex_mip", "gurobi_mip", "cplex_cp"):
-            raise ValueError(
-                "hybrid_threshold needs a SAT solver in --solvers, not a MIP backend. "
-                "Use --mip-backend to choose cplex_mip or gurobi_mip."
-            )
 
     if search_mode == "hybrid_race":
         if len(solvers) != 1:
@@ -247,8 +152,6 @@ def run_experiment(
                     search_fn = search_min_radius_kary
                 elif search_mode == "incremental":
                     search_fn = search_min_radius_incremental
-                elif search_mode == "hybrid_threshold":
-                    search_fn = search_min_radius_hybrid_threshold
                 elif search_mode == "hybrid_race":
                     search_fn = search_min_radius_hybrid_race
                 elif search_mode == "maxsat":
@@ -265,10 +168,7 @@ def run_experiment(
                     cancel_dict=cancel_dict,
                 )
 
-                if search_mode == "hybrid_threshold":
-                    extra_kwargs["hybrid_threshold"] = hybrid_threshold
-                    extra_kwargs["mip_backend"] = mip_backend
-                elif search_mode == "hybrid_race":
+                if search_mode == "hybrid_race":
                     extra_kwargs["mip_backend"] = mip_backend
 
                 status, best_radius, nvars, nclauses, centers, search_elapsed = search_fn(
@@ -316,7 +216,7 @@ def run_experiment(
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "cplex_cp": 9, "gurobi_mip": 10}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "maxsat": 4, "threshold_profile": 5, "hybrid_threshold": 6, "hybrid_race": 7}
+    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "maxsat": 4, "hybrid_race": 5}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
@@ -571,11 +471,6 @@ if __name__ == "__main__":
 
     args = parse_args()
 
-    if args.search_mode == "threshold_profile":
-        for p in [args.threshold_detail_out, args.threshold_summary_out]:
-            if p and os.path.exists(p):
-                os.remove(p)
-
     instance_data = load_instance_data(args.instances)
 
     base_dir = os.path.dirname(os.path.abspath(args.instances))
@@ -596,12 +491,9 @@ if __name__ == "__main__":
                 args.time_limit,
                 args.search_mode,
                 args.radii_workers,
-                hybrid_threshold=args.hybrid_threshold,
                 mip_backend=args.mip_backend,
                 mgr=MGR,
                 cancel_dict=CANCEL,
-                threshold_detail_out=args.threshold_detail_out,
-                threshold_summary_out=args.threshold_summary_out,
             )
             all_results.extend(res)
             print(f"[END] {inst_desc['name']}", flush=True)

@@ -199,7 +199,6 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
     if time_limit and time_limit > 0:
         model.parameters.timelimit.set(float(time_limit))
 
-    # Soft cancel hook for CPLEX
     try:
         aborter = cplex.Aborter()
         model.use_aborter(aborter)
