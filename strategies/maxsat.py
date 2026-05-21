@@ -254,6 +254,24 @@ def _pysat_maxsat_worker(wcnf_data, solver_name, send_conn):
             pass
 
 
+def _solve_wcnf_pysat_direct(wcnf, solver_name):
+    try:
+        if solver_name in PYSAT_MAXSAT_SOLVERS:
+            with RC2(wcnf) as solver:
+                model = solver.compute()
+                cost = solver.cost
+        else:
+            raise ValueError(f"Unsupported PySAT MaxSAT solver: {solver_name}")
+
+        if model is None:
+            return "error", cost, []
+        return "optimum", cost, model
+
+    except Exception:
+        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        return "error", None, []
+
+
 def _terminate_process_fast(proc, grace=0.2):
     if proc is None:
         return
@@ -283,14 +301,41 @@ def _terminate_process_fast(proc, grace=0.2):
 
 
 def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
-    recv_conn, send_conn = mp.Pipe(duplex=False)
+    try:
+        recv_conn, send_conn = mp.Pipe(duplex=False)
+    except OSError as exc:
+        print(
+            f"[MAXSAT-WARN] multiprocessing Pipe unavailable ({exc}); "
+            "running RC2 in-process without hard timeout enforcement.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _solve_wcnf_pysat_direct(wcnf, solver_name)
+
     proc = mp.Process(
         target=_pysat_maxsat_worker,
         args=(_wcnf_to_data(wcnf), solver_name, send_conn),
         daemon=True,
     )
 
-    proc.start()
+    try:
+        proc.start()
+    except OSError as exc:
+        print(
+            f"[MAXSAT-WARN] multiprocessing process unavailable ({exc}); "
+            "running RC2 in-process without hard timeout enforcement.",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            recv_conn.close()
+        except Exception:
+            pass
+        try:
+            send_conn.close()
+        except Exception:
+            pass
+        return _solve_wcnf_pysat_direct(wcnf, solver_name)
 
     try:
         send_conn.close()
@@ -360,10 +405,7 @@ def search_min_radius_maxsat(
     solver_name,
     time_limit,
     *,
-    radii_workers,
     seed_idx=None,
-    mgr=None,
-    cancel_dict=None,
 ):
     if encoding not in ("maxsat_setcover", "maxsat_cover"):
         raise ValueError(
@@ -397,26 +439,6 @@ def search_min_radius_maxsat(
     while lo <= hi:
         mid = (lo + hi) // 2
         radius = radii[mid]
-
-        if cancel_dict is not None and cancel_dict.get("cancel", False):
-            search_elapsed = time.perf_counter() - search_t0
-            if best_sat_idx is not None:
-                return (
-                    "cancelled_with_incumbent",
-                    best_radius,
-                    best_nvars,
-                    best_nclauses,
-                    best_centers,
-                    search_elapsed,
-                )
-            return (
-                "cancelled",
-                None,
-                last_nvars,
-                last_nclauses,
-                None,
-                search_elapsed,
-            )
 
         wcnf, info = inst._encode_wcnf_maxsat_setcover(radius)
 

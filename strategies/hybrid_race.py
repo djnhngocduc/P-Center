@@ -425,10 +425,7 @@ def search_min_radius_hybrid_race(
     time_limit,
     *,
     mip_backend="cplex_mip",
-    radii_workers,
     seed_idx=None,
-    mgr=None,
-    cancel_dict=None,
     verbose=True,
 ):
     search_t0 = time.perf_counter()

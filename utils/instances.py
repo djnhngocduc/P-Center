@@ -10,7 +10,7 @@ INF = 10 ** 12
 
 
 def load_instance_data(inst_file: str):
-    with open(inst_file, "r", encoding="utf-8", errors="ignore") as f:
+    with open(inst_file, "r", encoding="utf-8-sig", errors="ignore") as f:
         return json.load(f)
 
 

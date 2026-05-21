@@ -2,7 +2,6 @@ import argparse
 import json
 import time
 import os
-import multiprocessing as mp
 from collections import defaultdict
 import statistics as _stats
 import csv
@@ -19,10 +18,21 @@ from strategies.incremental import search_min_radius_incremental
 from strategies.maxsat import search_min_radius_maxsat
 
 from strategies.search import (
-    search_min_radius_parallel,
     search_min_radius_binary, 
-    search_min_radius_kary,
 )
+
+DEFAULT_SAT_SOLVERS = ["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat"]
+DEFAULT_INTERNAL_SAT_SOLVERS = ["maplecm", "maplechrono", "glucose4"]
+DEFAULT_MAXSAT_SOLVERS = ["rc2"]
+DEFAULT_SAT_ENCODINGS = [
+    "pysat_totalizer",
+    "pysat_mtotalizer",
+    "pysat_kmtotalizer",
+    "pypb_bdd",
+    "nsc",
+    "pb_bdd",
+]
+
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -35,14 +45,14 @@ def parse_args():
     ap.add_argument(
         "--encodings",
         nargs="+",
-        default=["pysat_totalizer", "pysat_mtotalizer", "pysat_kmtotalizer", "pypb_bdd", "nsc", "pb_bdd"],
-        help="Encodings to test: pysat_totalizer pysat_mtotalizer pysat_kmtotalizer pypb_bdd nsc pb_bdd",
+        default=None,
+        help="Encodings to test. Defaults depend on --search-mode.",
     )
     ap.add_argument(
         "--solvers",
         nargs="+",
-        default=["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat", "cplex_mip", "cplex_cp", "gurobi_mip"],
-        help="Solvers to use (internal SAT / external SAT / cplex_mip / cplex_cp / gurobi_mip)",
+        default=None,
+        help="Solvers to use. Defaults depend on --search-mode.",
     )
     ap.add_argument(
         "--time-limit",
@@ -53,9 +63,9 @@ def parse_args():
     ap.add_argument(
         "--search-mode",
         type=str,
-        default="parallel",
-        choices=["parallel", "binary", "kary", "incremental", "hybrid_race", "maxsat"],
-        help="Search strategy: parallel, binary, kary, incremental, hybrid_race, or maxsat",
+        default="binary",
+        choices=["binary", "incremental", "hybrid_race", "maxsat"],
+        help="Search strategy: binary, incremental, hybrid_race, or maxsat",
     )
     ap.add_argument(
         "--mip-backend",
@@ -65,18 +75,54 @@ def parse_args():
         help="MIP backend used internally by hybrid_race: cplex_mip or gurobi_mip",
     )
     ap.add_argument(
-        "--radii-workers",
-        type=int,
-        default=8,
-        help="Parallel radii workers",
-    )
-    ap.add_argument(
         "--out",
         type=str,
         default=os.path.join("results", "results.csv"),
         help="CSV output path",
     )
-    return ap.parse_args()
+    args = ap.parse_args()
+
+    if args.encodings is None:
+        if args.search_mode == "maxsat":
+            args.encodings = ["maxsat_setcover"]
+        else:
+            args.encodings = list(DEFAULT_SAT_ENCODINGS)
+
+    if args.solvers is None:
+        if args.search_mode == "incremental":
+            args.solvers = list(DEFAULT_INTERNAL_SAT_SOLVERS)
+        elif args.search_mode == "maxsat":
+            args.solvers = list(DEFAULT_MAXSAT_SOLVERS)
+        elif args.search_mode == "hybrid_race":
+            args.solvers = ["glucose4"]
+        else:
+            args.solvers = list(DEFAULT_SAT_SOLVERS)
+
+    if "cplex_cp" in args.solvers:
+        ap.error("cplex_cp has been disabled. Use cplex_mip or gurobi_mip with --search-mode binary.")
+
+    mip_solvers = {"cplex_mip", "gurobi_mip"}
+    selected_mip_solvers = [s for s in args.solvers if s in mip_solvers]
+    if selected_mip_solvers and args.search_mode != "binary":
+        ap.error(
+            "cplex_mip and gurobi_mip are only supported in --solvers with "
+            "--search-mode binary. For hybrid_race, choose the MIP side with --mip-backend."
+        )
+
+    if args.search_mode == "hybrid_race" and len(args.solvers) != 1:
+        ap.error(
+            "hybrid_race expects exactly one SAT solver in --solvers. "
+            "Choose the MIP side separately with --mip-backend."
+        )
+
+    if args.search_mode == "maxsat":
+        if len(args.encodings) != 1 or args.encodings[0] not in ("maxsat_setcover", "maxsat_cover"):
+            ap.error("maxsat mode expects exactly one encoding: --encodings maxsat_setcover")
+        bad_solvers = [s for s in args.solvers if s not in ("rc2", "openwbo")]
+        if bad_solvers:
+            ap.error("maxsat mode supports only --solvers rc2 openwbo")
+
+    return args
 
 def run_experiment(
     inst_desc,
@@ -84,19 +130,16 @@ def run_experiment(
     solvers,
     time_limit,
     search_mode,
-    radii_workers,
     *,
     mip_backend="cplex_mip",
-    mgr,
-    cancel_dict,
 ):
-    if "cplex_mip" in solvers and search_mode not in ("binary", "hybrid_race"):
-        raise ValueError("CPLEX backend currently supports only binary search or hybrid_race.")
-    if "cplex_cp" in solvers and search_mode not in ("parallel", "binary", "kary"):
-        raise ValueError("CPO backend currently supports only parallel, binary, or kary search.")
-    if "gurobi_mip" in solvers and search_mode not in ("parallel", "binary", "kary"):
+    if "cplex_cp" in solvers:
+        raise ValueError("cplex_cp has been disabled. Use cplex_mip or gurobi_mip with binary search.")
+    if "cplex_mip" in solvers and search_mode != "binary":
+        raise ValueError("CPLEX MIP backend currently supports only binary search.")
+    if "gurobi_mip" in solvers and search_mode != "binary":
         raise ValueError(
-            "Gurobi backend in --solvers only supports parallel, binary, or kary search. "
+            "Gurobi backend in --solvers supports only binary search. "
             "For hybrid modes, use --mip-backend gurobi_mip instead."
         )
     
@@ -136,7 +179,7 @@ def run_experiment(
                 )
 
     for solver_name in solvers:
-        solver_encodings = encodings if solver_name not in ("cplex_mip", "cplex_cp", "gurobi_mip") else ["setcover"]
+        solver_encodings = encodings if solver_name not in ("cplex_mip", "gurobi_mip") else ["setcover"]
         for encoding in solver_encodings:
             for run_id in range(1):
                 print(
@@ -144,12 +187,8 @@ def run_experiment(
                     f"encoding={encoding} solver={solver_name} search={search_mode}",
                     flush=True
                 )
-                if search_mode == "parallel":
-                    search_fn = search_min_radius_parallel
-                elif search_mode == "binary":
+                if search_mode == "binary":
                     search_fn = search_min_radius_binary
-                elif search_mode == "kary":
-                    search_fn = search_min_radius_kary
                 elif search_mode == "incremental":
                     search_fn = search_min_radius_incremental
                 elif search_mode == "hybrid_race":
@@ -159,13 +198,8 @@ def run_experiment(
                 else:
                     raise ValueError(f"Unknown search_mode: {search_mode}")
 
-                cancel_dict.clear()
-                
                 extra_kwargs = dict(
-                    radii_workers=radii_workers,
                     seed_idx=seed_idx,
-                    mgr=mgr,
-                    cancel_dict=cancel_dict,
                 )
 
                 if search_mode == "hybrid_race":
@@ -215,8 +249,8 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "cplex_cp": 9, "gurobi_mip": 10}
-    mode_rank = {"parallel": 0, "binary": 1, "kary": 2, "incremental": 3, "maxsat": 4, "hybrid_race": 5}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "gurobi_mip": 9}
+    mode_rank = {"binary": 0, "incremental": 1, "maxsat": 2, "hybrid_race": 3}
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
 
 def print_instance_summary_for_console(all_results_for_inst):
@@ -229,7 +263,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         inst_name = r["instance"]
         n = r["n"]
         p = r["p"]
-        mode = r.get("search_mode", "parallel")
+        mode = r.get("search_mode", "binary")
         cfg_runs[(r["encoding"], r["solver"], mode)].append(r)
 
     cfg_bestR = {}
@@ -298,7 +332,7 @@ def write_paper_table(all_results, out_csv_path: str):
         p = r["p"]
         enc = r["encoding"]
         sol = r["solver"]
-        mode = r.get("search_mode", "parallel")
+        mode = r.get("search_mode", "binary")
 
         all_instances.add((inst, n, p))
         methods_seen.add((enc, sol, mode))
@@ -465,10 +499,6 @@ def write_paper_table(all_results, out_csv_path: str):
             w.writerow(r)
 
 if __name__ == "__main__":
-    mp.set_start_method("spawn", force=True)
-    MGR = mp.Manager()
-    CANCEL = MGR.dict()
-
     args = parse_args()
 
     instance_data = load_instance_data(args.instances)
@@ -480,8 +510,6 @@ if __name__ == "__main__":
 
     all_results = []
     for inst_desc in instance_data:
-        CANCEL.clear()
-
         print(f"[BEGIN] {inst_desc['name']}", flush=True)
         try:
             res = run_experiment(
@@ -490,17 +518,14 @@ if __name__ == "__main__":
                 args.solvers,
                 args.time_limit,
                 args.search_mode,
-                args.radii_workers,
                 mip_backend=args.mip_backend,
-                mgr=MGR,
-                cancel_dict=CANCEL,
             )
             all_results.extend(res)
             print(f"[END] {inst_desc['name']}", flush=True)
         except Exception as e:
             traceback.print_exc()
             print(
-                f"[WARN] Bỏ qua {inst_desc.get('name')} do lỗi: {e}",
+                f"[WARN] Skip {inst_desc.get('name')} due to error: {e}",
                 flush=True
             )
 

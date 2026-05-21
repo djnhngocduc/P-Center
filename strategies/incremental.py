@@ -11,10 +11,7 @@ def search_min_radius_incremental(
     solver_name,
     time_limit,
     *,
-    radii_workers,
     seed_idx=None,
-    mgr=None,
-    cancel_dict=None
 ):
     search_t0 = time.perf_counter()
 
