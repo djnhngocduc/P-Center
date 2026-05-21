@@ -24,6 +24,17 @@ from strategies.search import (
 DEFAULT_SAT_SOLVERS = ["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat"]
 DEFAULT_INTERNAL_SAT_SOLVERS = ["maplecm", "maplechrono", "glucose4"]
 DEFAULT_MAXSAT_SOLVERS = ["rc2"]
+SUPPORTED_SOLVERS = {
+    "maplecm",
+    "maplechrono",
+    "sparrow2riss",
+    "glucose4",
+    "kissat",
+    "cplex_mip",
+    "gurobi_mip",
+    "rc2",
+    "openwbo",
+}
 DEFAULT_SAT_ENCODINGS = [
     "pysat_totalizer",
     "pysat_mtotalizer",
@@ -98,8 +109,14 @@ def parse_args():
         else:
             args.solvers = list(DEFAULT_SAT_SOLVERS)
 
-    if "cplex_cp" in args.solvers:
-        ap.error("cplex_cp has been disabled. Use cplex_mip or gurobi_mip with --search-mode binary.")
+    unsupported_solvers = [s for s in args.solvers if s not in SUPPORTED_SOLVERS]
+    if unsupported_solvers:
+        ap.error(
+            "unsupported solver(s): "
+            + ", ".join(unsupported_solvers)
+            + ". Supported solvers are: "
+            + ", ".join(sorted(SUPPORTED_SOLVERS))
+        )
 
     mip_solvers = {"cplex_mip", "gurobi_mip"}
     selected_mip_solvers = [s for s in args.solvers if s in mip_solvers]
@@ -133,8 +150,15 @@ def run_experiment(
     *,
     mip_backend="cplex_mip",
 ):
-    if "cplex_cp" in solvers:
-        raise ValueError("cplex_cp has been disabled. Use cplex_mip or gurobi_mip with binary search.")
+    unsupported_solvers = [s for s in solvers if s not in SUPPORTED_SOLVERS]
+    if unsupported_solvers:
+        raise ValueError(
+            "Unsupported solver(s): "
+            + ", ".join(unsupported_solvers)
+            + ". Supported solvers are: "
+            + ", ".join(sorted(SUPPORTED_SOLVERS))
+        )
+
     if "cplex_mip" in solvers and search_mode != "binary":
         raise ValueError("CPLEX MIP backend currently supports only binary search.")
     if "gurobi_mip" in solvers and search_mode != "binary":
@@ -160,7 +184,7 @@ def run_experiment(
                 "hybrid_race expects exactly one SAT solver in --solvers. "
                 "The MIP backend is selected separately by --mip-backend."
             )
-        if solvers[0] in ("cplex_mip", "gurobi_mip", "cplex_cp"):
+        if solvers[0] in ("cplex_mip", "gurobi_mip"):
             raise ValueError(
                 "hybrid_race needs a SAT solver in --solvers, not a MIP backend. "
                 "Use --mip-backend to choose cplex_mip or gurobi_mip."

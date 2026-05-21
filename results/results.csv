@@ -1,18 +1,18 @@
-Instance,n,p,glucose4 nsc hybrid_race radius,glucose4 nsc hybrid_race #vars,glucose4 nsc hybrid_race #clauses,glucose4 nsc hybrid_race cpu,glucose4 nsc hybrid_race load,glucose4 nsc hybrid_race search,glucose4 nsc hybrid_race total,glucose4 pysat_kmtotalizer hybrid_race radius,glucose4 pysat_kmtotalizer hybrid_race #vars,glucose4 pysat_kmtotalizer hybrid_race #clauses,glucose4 pysat_kmtotalizer hybrid_race cpu,glucose4 pysat_kmtotalizer hybrid_race load,glucose4 pysat_kmtotalizer hybrid_race search,glucose4 pysat_kmtotalizer hybrid_race total,glucose4 pysat_mtotalizer hybrid_race radius,glucose4 pysat_mtotalizer hybrid_race #vars,glucose4 pysat_mtotalizer hybrid_race #clauses,glucose4 pysat_mtotalizer hybrid_race cpu,glucose4 pysat_mtotalizer hybrid_race load,glucose4 pysat_mtotalizer hybrid_race search,glucose4 pysat_mtotalizer hybrid_race total,glucose4 pysat_totalizer hybrid_race radius,glucose4 pysat_totalizer hybrid_race #vars,glucose4 pysat_totalizer hybrid_race #clauses,glucose4 pysat_totalizer hybrid_race cpu,glucose4 pysat_totalizer hybrid_race load,glucose4 pysat_totalizer hybrid_race search,glucose4 pysat_totalizer hybrid_race total
-u1060,1060,10,2273.08,11605,23190,0.142,0.546,5.971,6.516,2273.08,4690,11382,0.106,0.546,5.324,5.869,2273.08,7581,56602,0.084,0.546,6.617,7.162,2273.08,1060,1061,0.392,0.546,9.405,9.950
-u1060,1060,20,1580.8,22050,44060,1.677,0.541,15.977,16.518,1580.8,5319,14769,1.329,0.541,13.749,14.290,1580.8,7581,56592,0.470,0.541,11.654,12.195,1580.8,1060,1061,2.502,0.541,18.101,18.642
-u1060,1060,30,1207.77,1060,1061,0.315,0.550,9.357,9.908,1207.77,1060,1061,0.317,0.550,9.584,10.134,1207.77,1060,1061,0.316,0.550,9.531,10.081,1207.77,1060,1061,0.315,0.550,9.836,10.387
-u1060,1060,40,1020.56,1060,1061,0.135,0.542,7.276,7.818,1020.56,1060,1061,0.135,0.542,7.407,7.949,1020.56,1060,1061,0.135,0.542,7.420,7.962,1020.56,1060,1061,0.134,0.542,7.461,8.002
-u1060,1060,50,904.92,1060,1061,0.214,0.547,10.684,11.230,904.92,1060,1061,0.214,0.547,10.595,11.141,904.92,1060,1061,0.216,0.547,10.634,11.181,904.92,1060,1061,0.218,0.547,10.691,11.237
-u1060,1060,60,781.17,1060,1061,0.169,0.543,8.910,9.453,781.17,1060,1061,0.169,0.543,8.968,9.511,781.17,1060,1061,0.168,0.543,8.843,9.386,781.17,1060,1061,0.170,0.543,9.047,9.591
-u1060,1060,70,710.75,1060,1061,0.145,0.546,9.720,10.266,710.75,1060,1061,0.143,0.546,9.718,10.264,710.75,1060,1061,0.145,0.546,9.679,10.226,710.75,1060,1061,0.146,0.546,9.862,10.408
-u1060,1060,80,652.16,1060,1061,0.313,0.553,4.826,5.379,652.16,1060,1061,0.315,0.553,4.598,5.151,652.16,1060,1061,0.313,0.553,4.654,5.207,652.16,1060,1061,0.311,0.553,4.766,5.319
-u1060,1060,90,607.87,1060,1061,0.064,0.554,4.565,5.118,607.87,1060,1061,0.064,0.554,4.364,4.918,607.87,1060,1061,0.064,0.554,4.552,5.106,607.87,1060,1061,0.064,0.554,4.572,5.126
-u1060,1060,100,570.01,1060,1061,0.082,0.546,4.445,4.992,570.01,1060,1061,0.080,0.546,4.213,4.759,570.01,1060,1061,0.079,0.546,4.382,4.928,570.01,1060,1061,0.079,0.546,4.483,5.029
-u1060,1060,110,538.84,1060,1061,0.057,0.549,4.245,4.793,538.84,1060,1061,0.058,0.549,4.132,4.680,538.84,1060,1061,0.057,0.549,4.191,4.740,538.84,1060,1061,0.057,0.549,4.229,4.778
-u1060,1060,120,510.27,1060,1061,0.083,0.551,4.666,5.217,510.27,1060,1061,0.082,0.551,4.542,5.093,510.27,1060,1061,0.085,0.551,4.529,5.080,510.27,1060,1061,0.084,0.551,4.753,5.304
-u1060,1060,130,499.65,1060,1061,0.056,0.551,4.226,4.777,499.65,1060,1061,0.056,0.551,4.106,4.657,499.65,1060,1061,0.056,0.551,4.205,4.756,499.65,1060,1061,0.056,0.551,4.272,4.823
-u1060,1060,140,452.46,1060,1061,0.041,0.550,4.178,4.728,452.46,1060,1061,0.042,0.550,4.059,4.609,452.46,1060,1061,0.041,0.550,4.164,4.714,452.46,1060,1061,0.042,0.550,4.251,4.801
-u1060,1060,150,447.01,1060,1061,0.052,0.545,4.188,4.732,447.01,1060,1061,0.050,0.545,4.127,4.671,447.01,1060,1061,0.051,0.545,4.172,4.717,447.01,1060,1061,0.054,0.545,4.129,4.674
-Num.,,,,,,15,15,15,15,,,,15,15,15,15,,,,15,15,15,15,,,,15,15,15,15
-Avg.,,,,,,0.236,0.548,6.882,7.430,,,,0.211,0.548,6.632,7.180,,,,0.152,0.548,6.615,7.163,,,,0.308,0.548,7.324,7.871
+Instance,n,p,cplex_cp nsc binary radius,cplex_cp nsc binary #vars,cplex_cp nsc binary #clauses,cplex_cp nsc binary load,cplex_cp nsc binary search,cplex_cp nsc binary total,cplex_cp pb_bdd binary radius,cplex_cp pb_bdd binary #vars,cplex_cp pb_bdd binary #clauses,cplex_cp pb_bdd binary load,cplex_cp pb_bdd binary search,cplex_cp pb_bdd binary total,cplex_cp pypb_bdd binary radius,cplex_cp pypb_bdd binary #vars,cplex_cp pypb_bdd binary #clauses,cplex_cp pypb_bdd binary load,cplex_cp pypb_bdd binary search,cplex_cp pypb_bdd binary total,cplex_cp pysat_kmtotalizer binary radius,cplex_cp pysat_kmtotalizer binary #vars,cplex_cp pysat_kmtotalizer binary #clauses,cplex_cp pysat_kmtotalizer binary load,cplex_cp pysat_kmtotalizer binary search,cplex_cp pysat_kmtotalizer binary total,cplex_cp pysat_mtotalizer binary radius,cplex_cp pysat_mtotalizer binary #vars,cplex_cp pysat_mtotalizer binary #clauses,cplex_cp pysat_mtotalizer binary load,cplex_cp pysat_mtotalizer binary search,cplex_cp pysat_mtotalizer binary total,cplex_cp pysat_totalizer binary radius,cplex_cp pysat_totalizer binary #vars,cplex_cp pysat_totalizer binary #clauses,cplex_cp pysat_totalizer binary load,cplex_cp pysat_totalizer binary search,cplex_cp pysat_totalizer binary total
+u1060,1060,10,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,20,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,30,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,40,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,50,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,60,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,70,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,80,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,90,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,100,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,110,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,120,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,130,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,140,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+u1060,1060,150,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-
+Num.,,,,,,0,0,0,,,,0,0,0,,,,0,0,0,,,,0,0,0,,,,0,0,0,,,,0,0,0
+Avg.,,,,,,-,-,-,,,,-,-,-,,,,-,-,-,,,,-,-,-,,,,-,-,-,,,,-,-,-

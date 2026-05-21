@@ -13,7 +13,6 @@ from solvers.backend import (
     run_external_solver, 
     solve_radius_cplex, 
     solve_radius_gurobi, 
-    solve_radius_cpo,
 )
 
 _CANCEL_SHARED = None
@@ -57,7 +56,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     try:
         global _INST_SHARED
 
-        if solver_name in ("cplex_mip", "cplex_cp", "gurobi_mip"):
+        if solver_name in ("cplex_mip", "gurobi_mip"):
             data = _INST_SHARED._build_setcover_data(radius)
             print(
                 f"[ENCODE-{solver_name.upper()}] idx={idx} R={radius} "
@@ -82,14 +81,6 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     time_limit=time_limit,
                     data=data,
                 )
-            return solve_radius_cpo(
-                inst=_INST_SHARED,
-                idx=idx,
-                radius=radius,
-                time_limit=time_limit,
-                data=data,
-            )
-
         cnf, varmap = _INST_SHARED._encode_cnf(radius, encoding)
 
         print(
