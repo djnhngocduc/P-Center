@@ -83,17 +83,31 @@ def _run_external_maxsat_solver(
     solver_args = extra_args + [wcnf_path]
     cmd = [bin_path] + solver_args
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        cwd=solver_dir,
-        env=env,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            cwd=solver_dir,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        try:
+            if os.path.exists(wcnf_path):
+                os.remove(wcnf_path)
+        except Exception:
+            pass
+        print(
+            f"[MAXSAT-SOLVER-ERROR] solver={solver_name}: could not start "
+            f"{bin_path}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "error", None, []
 
     if cancel_ev is not None:
         def _watch_cancel():
@@ -407,10 +421,9 @@ def search_min_radius_maxsat(
     *,
     seed_idx=None,
 ):
-    if encoding not in ("maxsat_setcover", "maxsat_cover"):
+    if encoding is not None:
         raise ValueError(
-            "MaxSAT set-cover mode expects --encodings maxsat_setcover "
-            "(or alias maxsat_cover)."
+            "MaxSAT mode uses encoding=None and does not need a SAT encoding."
         )
 
     search_t0 = time.perf_counter()
@@ -440,7 +453,7 @@ def search_min_radius_maxsat(
         mid = (lo + hi) // 2
         radius = radii[mid]
 
-        wcnf, info = inst._encode_wcnf_maxsat_setcover(radius)
+        wcnf, info = inst._encode_wcnf_maxsat(radius)
 
         if wcnf is None:
             decided[mid] = "unsat"

@@ -104,6 +104,8 @@ class PCenterSAT:
                     cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
             elif encoding == "nsc":
                 self._encode_atmost_nsc(cnf, lits, bound)
+            elif encoding == "sc":
+                self._encode_atmost_sc(cnf, lits, bound)
             elif encoding == "pypb_bdd":
                 enc_kind = PBEncType.bdd
                 with _PYSAT_CNF_LOCK:
@@ -129,7 +131,7 @@ class PCenterSAT:
         }
         return cnf, info
     
-    def _encode_wcnf_maxsat_setcover(self, radius: float):
+    def _encode_wcnf_maxsat(self, radius: float):
         wcnf = WCNF()
 
         active_demands = list(range(self.n))
@@ -254,6 +256,57 @@ class PCenterSAT:
 
         cnf.nv = max(cnf.nv, next_var - 1)
 
+    def _encode_atmost_sc(self, cnf, lits, bound):
+        n = len(lits)
+        k = bound
+
+        if k < 0:
+            cnf.append([])
+            return
+        if k == 0:
+            for l in lits:
+                cnf.append([-l])
+            cnf.nv = max(getattr(cnf, "nv", 0), max(lits) if lits else 0)
+            return
+        if n == 0 or k >= n:
+            cnf.nv = max(getattr(cnf, "nv", 0), max(lits) if lits else 0)
+            return
+
+        existing_max = getattr(cnf, "nv", 0)
+        max_input = max(lits) if lits else 0
+        next_var = max(existing_max, max_input) + 1
+
+        def new_var():
+            nonlocal next_var
+            v = next_var
+            next_var += 1
+            return v
+
+        S = []
+        for _ in range(n - 1):
+            S.append([new_var() for _ in range(k)])
+
+        cnf.append([-lits[0], S[0][0]])
+        for j in range(1, k):
+            cnf.append([-S[0][j]])
+
+        for i in range(1, n - 1):
+            prev = S[i - 1]
+            curr = S[i]
+            x = lits[i]
+
+            cnf.append([-x, curr[0]])
+            cnf.append([-prev[0], curr[0]])
+
+            for j in range(1, k):
+                cnf.append([-x, -prev[j - 1], curr[j]])
+                cnf.append([-prev[j], curr[j]])
+
+            cnf.append([-x, -prev[k - 1]])
+
+        cnf.append([-lits[n - 1], -S[n - 2][k - 1]])
+        cnf.nv = max(getattr(cnf, "nv", 0), next_var - 1)
+
     def _encode_atmost_pb2cnf(self, cnf, lits, bound, top_id_start):
         lits = [int(x) for x in lits]
         n = len(lits)
@@ -340,6 +393,9 @@ class PCenterSAT:
 
         elif encoding == "nsc":
             self._encode_atmost_nsc(cnf, lits, bound)
+
+        elif encoding == "sc":
+            self._encode_atmost_sc(cnf, lits, bound)
 
         elif encoding == "pypb_bdd":
             enc_kind = PBEncType.bdd

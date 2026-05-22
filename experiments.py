@@ -24,6 +24,10 @@ from strategies.search import (
 DEFAULT_SAT_SOLVERS = ["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat"]
 DEFAULT_INTERNAL_SAT_SOLVERS = ["maplecm", "maplechrono", "glucose4"]
 DEFAULT_MAXSAT_SOLVERS = ["rc2"]
+MIP_SOLVERS = {"cplex_mip", "gurobi_mip"}
+MAXSAT_SOLVERS = {"rc2", "openwbo"}
+MIP_ENCODING = None
+MAXSAT_ENCODING = None
 SUPPORTED_SOLVERS = {
     "maplecm",
     "maplechrono",
@@ -41,8 +45,23 @@ DEFAULT_SAT_ENCODINGS = [
     "pysat_kmtotalizer",
     "pypb_bdd",
     "nsc",
+    "sc",
     "pb_bdd",
 ]
+
+
+def default_encodings_for(search_mode, solvers):
+    if search_mode == "maxsat":
+        return [MAXSAT_ENCODING]
+    if search_mode == "binary" and solvers and all(s in MIP_SOLVERS for s in solvers):
+        return [MIP_ENCODING]
+    return list(DEFAULT_SAT_ENCODINGS)
+
+
+def effective_encodings_for_solver(solver_name, encodings):
+    if solver_name in MIP_SOLVERS:
+        return [MIP_ENCODING]
+    return encodings
 
 
 def parse_args():
@@ -57,7 +76,10 @@ def parse_args():
         "--encodings",
         nargs="+",
         default=None,
-        help="Encodings to test. Defaults depend on --search-mode.",
+        help=(
+            "SAT encodings to test. MIP and MaxSAT ignore this option and "
+            "use encoding=None."
+        ),
     )
     ap.add_argument(
         "--solvers",
@@ -93,12 +115,6 @@ def parse_args():
     )
     args = ap.parse_args()
 
-    if args.encodings is None:
-        if args.search_mode == "maxsat":
-            args.encodings = ["maxsat_setcover"]
-        else:
-            args.encodings = list(DEFAULT_SAT_ENCODINGS)
-
     if args.solvers is None:
         if args.search_mode == "incremental":
             args.solvers = list(DEFAULT_INTERNAL_SAT_SOLVERS)
@@ -109,6 +125,9 @@ def parse_args():
         else:
             args.solvers = list(DEFAULT_SAT_SOLVERS)
 
+    if args.encodings is None:
+        args.encodings = default_encodings_for(args.search_mode, args.solvers)
+
     unsupported_solvers = [s for s in args.solvers if s not in SUPPORTED_SOLVERS]
     if unsupported_solvers:
         ap.error(
@@ -118,8 +137,7 @@ def parse_args():
             + ", ".join(sorted(SUPPORTED_SOLVERS))
         )
 
-    mip_solvers = {"cplex_mip", "gurobi_mip"}
-    selected_mip_solvers = [s for s in args.solvers if s in mip_solvers]
+    selected_mip_solvers = [s for s in args.solvers if s in MIP_SOLVERS]
     if selected_mip_solvers and args.search_mode != "binary":
         ap.error(
             "cplex_mip and gurobi_mip are only supported in --solvers with "
@@ -133,9 +151,11 @@ def parse_args():
         )
 
     if args.search_mode == "maxsat":
-        if len(args.encodings) != 1 or args.encodings[0] not in ("maxsat_setcover", "maxsat_cover"):
-            ap.error("maxsat mode expects exactly one encoding: --encodings maxsat_setcover")
-        bad_solvers = [s for s in args.solvers if s not in ("rc2", "openwbo")]
+        if len(args.encodings) != 1 or args.encodings[0] is not MAXSAT_ENCODING:
+            ap.error(
+                "maxsat mode uses encoding=None; omit --encodings"
+            )
+        bad_solvers = [s for s in args.solvers if s not in MAXSAT_SOLVERS]
         if bad_solvers:
             ap.error("maxsat mode supports only --solvers rc2 openwbo")
 
@@ -150,6 +170,9 @@ def run_experiment(
     *,
     mip_backend="cplex_mip",
 ):
+    solvers = list(solvers)
+    encodings = default_encodings_for(search_mode, solvers) if encodings is None else list(encodings)
+
     unsupported_solvers = [s for s in solvers if s not in SUPPORTED_SOLVERS]
     if unsupported_solvers:
         raise ValueError(
@@ -191,19 +214,19 @@ def run_experiment(
             )
 
     if search_mode == "maxsat":
-        if len(encodings) != 1 or encodings[0] not in ("maxsat_setcover", "maxsat_cover"):
+        if len(encodings) != 1 or encodings[0] is not MAXSAT_ENCODING:
             raise ValueError(
-                "maxsat mode expects exactly one encoding: --encodings maxsat_setcover"
+                "maxsat mode uses encoding=None; omit encodings."
             )
 
         for s in solvers:
-            if s not in ("rc2", "openwbo"):
+            if s not in MAXSAT_SOLVERS:
                 raise ValueError(
                     "maxsat mode supports only --solvers rc2, openwbo"
                 )
 
     for solver_name in solvers:
-        solver_encodings = encodings if solver_name not in ("cplex_mip", "gurobi_mip") else ["setcover"]
+        solver_encodings = effective_encodings_for_solver(solver_name, encodings)
         for encoding in solver_encodings:
             for run_id in range(1):
                 print(
@@ -275,7 +298,8 @@ def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
     solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "gurobi_mip": 9}
     mode_rank = {"binary": 0, "incremental": 1, "maxsat": 2, "hybrid_race": 3}
-    return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc
+    enc_key = "" if enc is None else enc
+    return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc_key
 
 def print_instance_summary_for_console(all_results_for_inst):
     cfg_runs = defaultdict(list)
