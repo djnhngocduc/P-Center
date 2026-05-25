@@ -1,18 +1,6 @@
 import math
 from typing import List, Tuple
-from threading import RLock
 from pysat.formula import CNF, WCNF
-from pysat.card import CardEnc
-from pysat.card import EncType as CardEncType
-
-from pysat.pb import PBEnc
-from pysat.pb import EncType as PBEncType
-
-from pypblib import pblib
-from pypblib.pblib import PBConfig, Pb2cnf
-
-_PYSAT_CNF_LOCK = RLock()
-DEBUG_REDUCTION = False
 
 class PCenterSAT:
     def __init__(self, dist: List[List[float]], p: int):
@@ -80,46 +68,10 @@ class PCenterSAT:
         if candidates:
             lits = [self.y_lit_all[j] for j in candidates]
 
-            existing_max = getattr(cnf, "nv", 0)
-            max_y = self.y_lit_all[-1] if self.n > 0 else existing_max
-            top_id = max(existing_max, max_y)
-
-            if encoding == "pysat_kmtotalizer":
-                enc_kind = CardEncType.kmtotalizer
-                with _PYSAT_CNF_LOCK:
-                    amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
-                    cnf.extend(amo.clauses)
-                    cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-            elif encoding == "pysat_mtotalizer":
-                enc_kind = CardEncType.mtotalizer
-                with _PYSAT_CNF_LOCK:
-                    amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
-                    cnf.extend(amo.clauses)
-                    cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-            elif encoding == "pysat_totalizer":
-                enc_kind = CardEncType.totalizer
-                with _PYSAT_CNF_LOCK:
-                    amo = CardEnc.atmost(lits=lits, bound=bound, top_id=top_id, encoding=enc_kind)
-                    cnf.extend(amo.clauses)
-                    cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-            elif encoding == "nsc":
+            if encoding == "nsc":
                 self._encode_atmost_nsc(cnf, lits, bound)
             elif encoding == "sc":
                 self._encode_atmost_sc(cnf, lits, bound)
-            elif encoding == "pypb_bdd":
-                enc_kind = PBEncType.bdd
-                with _PYSAT_CNF_LOCK:
-                    pbcnf = PBEnc.atmost(
-                        lits=lits,
-                        weights=[1] * len(lits),
-                        bound=bound,
-                        top_id=top_id,
-                        encoding=enc_kind
-                    )
-                    cnf.extend(pbcnf.clauses)
-                    cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
-            elif encoding == "pb_bdd":
-                self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
             else:
                 raise ValueError(f"Unsupported SAT encoding: {encoding}")
             
@@ -307,37 +259,6 @@ class PCenterSAT:
         cnf.append([-lits[n - 1], -S[n - 2][k - 1]])
         cnf.nv = max(getattr(cnf, "nv", 0), next_var - 1)
 
-    def _encode_atmost_pb2cnf(self, cnf, lits, bound, top_id_start):
-        lits = [int(x) for x in lits]
-        n = len(lits)
-        k = int(bound)
-        first_free = int(max(getattr(cnf, "nv", 0), max(lits, default=0), int(top_id_start)) + 1)
-
-        if k < 0:
-            cnf.append([])
-            return
-        if k == 0:
-            for l in lits:
-                cnf.append([-l])
-            cnf.nv = max(getattr(cnf, "nv", 0), max(lits, default=0))
-            return
-        if n == 0 or k >= n:
-            cnf.nv = max(getattr(cnf, "nv", 0), max(lits, default=0))
-            return
-
-        cfg = PBConfig()
-        cfg.set_PB_Encoder(pblib.PB_BDD)
-
-        pb2 = Pb2cnf(cfg)
-
-        formula = [] 
-        max_var = pb2.encode_at_most_k(lits, int(k), formula, int(first_free))
-
-        for cls in formula:
-            cnf.append([int(v) for v in cls])
-
-        cnf.nv = max(getattr(cnf, "nv", 0), int(max_var))
-    
     def _prepare_incremental_cover_order(self):
         if self._incremental_cover_order is not None:
             return
@@ -362,56 +283,12 @@ class PCenterSAT:
 
         max_y = self.y_lit_all[-1] if self.n > 0 else 0
         cnf.nv = max(getattr(cnf, "nv", 0), max_y)
-        top_id = cnf.nv
 
-        if encoding == "pysat_kmtotalizer":
-            enc_kind = CardEncType.kmtotalizer
-            with _PYSAT_CNF_LOCK:
-                amo = CardEnc.atmost(
-                    lits=lits, bound=bound, top_id=top_id, encoding=enc_kind
-                )
-                cnf.extend(amo.clauses)
-                cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-
-        elif encoding == "pysat_mtotalizer":
-            enc_kind = CardEncType.mtotalizer
-            with _PYSAT_CNF_LOCK:
-                amo = CardEnc.atmost(
-                    lits=lits, bound=bound, top_id=top_id, encoding=enc_kind
-                )
-                cnf.extend(amo.clauses)
-                cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-
-        elif encoding == "pysat_totalizer":
-            enc_kind = CardEncType.totalizer
-            with _PYSAT_CNF_LOCK:
-                amo = CardEnc.atmost(
-                    lits=lits, bound=bound, top_id=top_id, encoding=enc_kind
-                )
-                cnf.extend(amo.clauses)
-                cnf.nv = max(getattr(cnf, "nv", 0), getattr(amo, "nv", 0))
-
-        elif encoding == "nsc":
+        if encoding == "nsc":
             self._encode_atmost_nsc(cnf, lits, bound)
 
         elif encoding == "sc":
             self._encode_atmost_sc(cnf, lits, bound)
-
-        elif encoding == "pypb_bdd":
-            enc_kind = PBEncType.bdd
-            with _PYSAT_CNF_LOCK:
-                pbcnf = PBEnc.atmost(
-                    lits=lits,
-                    weights=[1] * len(lits),
-                    bound=bound,
-                    top_id=top_id,
-                    encoding=enc_kind,
-                )
-                cnf.extend(pbcnf.clauses)
-                cnf.nv = max(getattr(cnf, "nv", 0), getattr(pbcnf, "nv", 0))
-
-        elif encoding == "pb_bdd":
-            self._encode_atmost_pb2cnf(cnf, lits, bound, top_id)
 
         else:
             raise ValueError(f"Unsupported encoding for incremental mode: {encoding}")

@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import shutil
 import atexit
@@ -20,6 +21,27 @@ _INST_SHARED = None
 _LOCAL_TMPDIR = None
 
 
+def _fmt_seconds(value):
+    if value is None or value is False:
+        return "unlimited"
+    try:
+        return f"{float(value):.3f}s"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_centers(centers, max_items=16):
+    if centers is None:
+        return "centers=None"
+
+    count = len(centers)
+    if count <= max_items:
+        return f"centers={centers}"
+
+    preview = ", ".join(str(x) for x in centers[:max_items])
+    return f"centers_count={count} centers=[{preview}, ...]"
+
+
 def _pool_initializer(cancel_proxy, inst):
     global _CANCEL_SHARED, _LOCAL_TMPDIR, _INST_SHARED
 
@@ -30,8 +52,7 @@ def _pool_initializer(cancel_proxy, inst):
     _LOCAL_TMPDIR = tempfile.mkdtemp(prefix="pcsat_worker_", dir=base_tmp)
 
     print(
-        f"[POOL] worker PID={os.getpid()} tmpdir={_LOCAL_TMPDIR}",
-        file=sys.stderr,
+        f"[WORKER-INIT] pid={os.getpid()} tmpdir={_LOCAL_TMPDIR}",
         flush=True,
     )
 
@@ -46,10 +67,17 @@ def _pool_initializer(cancel_proxy, inst):
 
 
 def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     pid = os.getpid()
     print(
-        f"[WORKER-START] pid={pid} idx={idx} R={radius} "
-        f"enc={encoding} solver={solver_name} limit={time_limit}s",
+        f"[CHECK-START] pid={pid} idx={idx} R={radius} "
+        f"solver={solver_name} encoding={encoding} budget={_fmt_seconds(time_limit)}",
         flush=True
     )
 
@@ -65,12 +93,16 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 f"rows={0 if data is None else len(data.get('cover_rows', []))}",
                 flush=True
             )
+            step_time_limit = _remaining_time()
+            if data is not None and time_limit and time_limit > 0 and step_time_limit <= 0:
+                return idx, radius, "timeout", data["n"], len(data["cover_rows"]) + 1, None
+
             if solver_name == "cplex_mip":
                 return solve_radius_cplex(
                     inst=_INST_SHARED,
                     idx=idx,
                     radius=radius,
-                    time_limit=time_limit,
+                    time_limit=step_time_limit,
                     data=data,
                 )
             if solver_name == "gurobi_mip":
@@ -78,14 +110,13 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                     inst=_INST_SHARED,
                     idx=idx,
                     radius=radius,
-                    time_limit=time_limit,
+                    time_limit=step_time_limit,
                     data=data,
                 )
         cnf, varmap = _INST_SHARED._encode_cnf(radius, encoding)
 
         print(
-            f"[ENCODE] idx={idx} R={radius} |Nc|={len(varmap.get('Nc', []))} "
-            f"|Nd|={len(varmap.get('Nd', []))} "
+            f"[ENCODE-SAT] idx={idx} R={radius} "
             f"candidates={len(varmap.get('candidates', []))} "
             f"bound={varmap.get('bound')} "
             f"clauses={0 if cnf is None else len(cnf.clauses)} "
@@ -95,11 +126,15 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
 
         if cnf is None:
             print(
-                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> UNSAT(by reduction)",
+                f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                f"status=unsat reason=no_coverage",
                 flush=True
             )
             return idx, radius, "unsat", None, None, None
+
+        step_time_limit = _remaining_time()
+        if time_limit and time_limit > 0 and step_time_limit <= 0:
+            return idx, radius, "timeout", cnf.nv, len(cnf.clauses), None
 
         if solver_name in EXTERNAL_SOLVERS:
             cancel_ev = None
@@ -112,7 +147,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             status, model = run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
-                time_limit=time_limit,
+                time_limit=step_time_limit,
                 cancel_ev=cancel_ev,
                 tmpdir=_LOCAL_TMPDIR,
             )
@@ -122,16 +157,16 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
 
             if status in ("timeout", "error"):
                 print(
-                    f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> {status.upper()}",
+                    f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                    f"status={status}",
                     flush=True
                 )
                 return idx, radius, status, nvars, nclauses, None
 
             if status == "unsat":
                 print(
-                    f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> UNSAT",
+                    f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                    f"status=unsat",
                     flush=True
                 )
                 return idx, radius, "unsat", nvars, nclauses, None
@@ -147,8 +182,8 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
             }
             centers = sorted(chosen | Nc)
             print(
-                f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                f"-> SAT centers={centers}",
+                f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                f"status=sat {_fmt_centers(centers)}",
                 flush=True
             )
             return idx, radius, "sat", nvars, nclauses, centers
@@ -174,8 +209,8 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
 
             timer = None
             try:
-                if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
-                    timer = threading.Timer(time_limit, solver.interrupt)
+                if step_time_limit and step_time_limit > 0 and hasattr(solver, "interrupt"):
+                    timer = threading.Timer(step_time_limit, solver.interrupt)
                     timer.start()
                     try:
                         sat = solver.solve_limited(expect_interrupt=True)
@@ -190,15 +225,15 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
 
                 if sat is None:
                     print(
-                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT",
+                        f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                        f"status=timeout",
                         flush=True
                     )
                     return idx, radius, "timeout", nvars, nclauses, None
                 if not sat:
                     print(
-                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> UNSAT",
+                        f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                        f"status=unsat",
                         flush=True
                     )
                     return idx, radius, "unsat", nvars, nclauses, None
@@ -206,8 +241,8 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 model = solver.get_model() or []
                 if not model:
                     print(
-                        f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                        f"-> TIMEOUT(no model)",
+                        f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                        f"status=timeout reason=no_model",
                         flush=True
                     )
                     return idx, radius, "timeout", nvars, nclauses, None
@@ -219,8 +254,8 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
                 chosen = {j for j, v in enumerate(y_vars) if (v in model_set) and (j in candidates)}
                 centers = sorted(chosen | Nc)
                 print(
-                    f"[WORKER-END] pid={pid} idx={idx} R={radius} "
-                    f"-> SAT centers={centers}",
+                    f"[CHECK-END] pid={pid} idx={idx} R={radius} "
+                    f"status=sat {_fmt_centers(centers)}",
                     flush=True
                 )
                 return idx, radius, "sat", nvars, nclauses, centers
@@ -231,7 +266,7 @@ def _solve_radius_worker_proc(idx, encoding, solver_name, radius, time_limit):
     except Exception:
         tb = traceback.format_exc()
         print(
-            f"[WORKER-END] pid={pid} idx={idx} R={radius}\n{tb}",
+            f"[CHECK-END] pid={pid} idx={idx} R={radius} status=error\n{tb}",
             file=sys.stderr,
             flush=True
         )

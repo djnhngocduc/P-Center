@@ -14,6 +14,29 @@ def search_min_radius_binary(
     seed_idx=None,
 ):
     search_t0 = time.perf_counter()
+    deadline = (
+        search_t0 + float(time_limit)
+        if time_limit and time_limit > 0
+        else None
+    )
+
+    def _remaining_time():
+        if deadline is None:
+            return time_limit
+        return max(0.0, deadline - time.perf_counter())
+
+    def _timeout_result():
+        search_elapsed = time.perf_counter() - search_t0
+        if best_sat_idx is not None:
+            return (
+                "timeout_with_incumbent",
+                radii[best_sat_idx],
+                best_nvars,
+                best_nclauses,
+                best_centers,
+                search_elapsed,
+            )
+        return "timeout", None, None, None, None, search_elapsed
 
     radii = inst.radii
     nR = len(radii)
@@ -40,6 +63,11 @@ def search_min_radius_binary(
     _pool_initializer(None, inst)
 
     while lo <= hi:
+        step_time_limit = _remaining_time()
+        if deadline is not None and step_time_limit <= 0:
+            print("[BINARY-TIMEOUT] instance-level time budget exhausted", flush=True)
+            return _timeout_result()
+
         mid = (lo + hi) // 2
         R = radii[mid]
 
@@ -54,7 +82,7 @@ def search_min_radius_binary(
                 encoding,
                 solver_name,
                 R,
-                time_limit,
+                step_time_limit,
             )
         except Exception:
             tb = traceback.format_exc()
@@ -129,16 +157,27 @@ def search_min_radius_binary(
         return "infeasible", None, None, None, None, search_elapsed
 
     cert_unsat_idx = best_sat_idx + 1
-    certified = cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
+    is_smallest_candidate = best_sat_idx == nR - 1
+    certified = is_smallest_candidate or (
+        cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
+    )
 
     if certified:
-        cert_unsat_radius = radii[cert_unsat_idx]
-        print(
-            f"[BINARY-CERT] optimality boundary: "
-            f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]}, "
-            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={cert_unsat_radius}",
-            flush=True,
-        )
+        if is_smallest_candidate:
+            print(
+                f"[BINARY-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]} "
+                f"is the smallest candidate radius",
+                flush=True,
+            )
+        else:
+            cert_unsat_radius = radii[cert_unsat_idx]
+            print(
+                f"[BINARY-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={radii[best_sat_idx]}, "
+                f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={cert_unsat_radius}",
+                flush=True,
+            )
         final_status = "OK"
     else:
         print(

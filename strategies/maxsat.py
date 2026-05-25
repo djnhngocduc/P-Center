@@ -52,6 +52,13 @@ def _run_external_maxsat_solver(
     cancel_ev=None,
     tmpdir=None,
 ):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     bin_path, extra_args = EXTERNAL_MAXSAT_SOLVERS[solver_name]
 
     if (not os.path.exists(bin_path)) or (not os.access(bin_path, os.X_OK)):
@@ -73,6 +80,14 @@ def _run_external_maxsat_solver(
     )
 
     _write_wcnf(wcnf, wcnf_path)
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        try:
+            if os.path.exists(wcnf_path):
+                os.remove(wcnf_path)
+        except Exception:
+            pass
+        return "timeout", None, []
 
     solver_dir = os.path.dirname(bin_path)
 
@@ -116,9 +131,19 @@ def _run_external_maxsat_solver(
 
         threading.Thread(target=_watch_cancel, daemon=True).start()
 
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        _kill_subprocess_tree(proc)
+        try:
+            if os.path.exists(wcnf_path):
+                os.remove(wcnf_path)
+        except Exception:
+            pass
+        return "timeout", None, []
+
     try:
         stdout, stderr = proc.communicate(
-            timeout=time_limit if (time_limit and time_limit > 0) else None
+            timeout=step_time_limit if (step_time_limit and step_time_limit > 0) else None
         )
     except subprocess.TimeoutExpired:
         _kill_subprocess_tree(proc)
@@ -155,6 +180,14 @@ def _run_external_maxsat_solver(
             flush=True,
         )
         return "error", cost, []
+
+    if status == "sat":
+        print(
+            f"[MAXSAT-SOLVER-WARN] {solver_name} reported SATISFIABLE "
+            "without an optimality proof; treating result as incomplete.",
+            flush=True,
+        )
+        return "incomplete", cost, model
 
     return status, cost, model
 
@@ -213,9 +246,6 @@ def _parse_maxsat_model(stdout: str) -> Tuple[str, Optional[int], List[int]]:
                     model.append(int(tok))
                 except ValueError:
                     pass
-
-    if status == "sat":
-        status = "optimum"
 
     return status, cost, model
 
@@ -315,6 +345,13 @@ def _terminate_process_fast(proc, grace=0.2):
 
 
 def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     try:
         recv_conn, send_conn = mp.Pipe(duplex=False)
     except OSError as exc:
@@ -356,7 +393,10 @@ def _solve_wcnf_pysat(wcnf, solver_name, time_limit):
     except Exception:
         pass
 
-    timeout = time_limit if (time_limit and time_limit > 0) else None
+    timeout = _remaining_time() if (time_limit and time_limit > 0) else None
+    if timeout is not None and timeout <= 0:
+        _terminate_process_fast(proc)
+        return "timeout", None, []
 
     try:
         if timeout is None:
@@ -427,6 +467,16 @@ def search_min_radius_maxsat(
         )
 
     search_t0 = time.perf_counter()
+    deadline = (
+        search_t0 + float(time_limit)
+        if time_limit and time_limit > 0
+        else None
+    )
+
+    def _remaining_time():
+        if deadline is None:
+            return time_limit
+        return max(0.0, deadline - time.perf_counter())
 
     radii = inst.radii
     nR = len(radii)
@@ -450,6 +500,20 @@ def search_min_radius_maxsat(
     decided = {}
 
     while lo <= hi:
+        step_time_limit = _remaining_time()
+        if deadline is not None and step_time_limit <= 0:
+            search_elapsed = time.perf_counter() - search_t0
+            if best_sat_idx is not None:
+                return (
+                    "timeout_with_incumbent",
+                    best_radius,
+                    best_nvars,
+                    best_nclauses,
+                    best_centers,
+                    search_elapsed,
+                )
+            return "timeout", None, last_nvars, last_nclauses, None, search_elapsed
+
         mid = (lo + hi) // 2
         radius = radii[mid]
 
@@ -467,11 +531,24 @@ def search_min_radius_maxsat(
 
         last_nvars = wcnf.nv
         last_nclauses = len(wcnf.hard) + len(wcnf.soft)
+        step_time_limit = _remaining_time()
+        if deadline is not None and step_time_limit <= 0:
+            search_elapsed = time.perf_counter() - search_t0
+            if best_sat_idx is not None:
+                return (
+                    "timeout_with_incumbent",
+                    best_radius,
+                    best_nvars,
+                    best_nclauses,
+                    best_centers,
+                    search_elapsed,
+                )
+            return "timeout", None, last_nvars, last_nclauses, None, search_elapsed
 
         print(
             f"[MAXSAT-STEP] solver={solver_name} idx={mid} R={radius} "
             f"lo={lo} hi={hi} nvars={last_nvars} "
-            f"nclauses={last_nclauses} time_limit={time_limit}",
+            f"nclauses={last_nclauses} time_limit={step_time_limit}",
             flush=True,
         )
 
@@ -480,7 +557,7 @@ def search_min_radius_maxsat(
         status, cost, model = _solve_wcnf(
             wcnf,
             solver_name,
-            time_limit,
+            step_time_limit,
         )
 
         step_wall = time.perf_counter() - step_t0
@@ -491,10 +568,15 @@ def search_min_radius_maxsat(
             flush=True,
         )
 
-        if status not in ("optimum", "sat"):
+        if status == "unsat":
+            decided[mid] = "unsat"
+            hi = mid - 1
+            continue
+
+        if status != "optimum":
             decided[mid] = status
 
-            if status in ("timeout", "error") and best_sat_idx is not None:
+            if status in ("timeout", "error", "incomplete") and best_sat_idx is not None:
                 search_elapsed = time.perf_counter() - search_t0
                 return (
                     f"{status}_with_incumbent",
@@ -546,18 +628,27 @@ def search_min_radius_maxsat(
         )
 
     cert_unsat_idx = best_sat_idx + 1
-    certified = (
+    is_smallest_candidate = best_sat_idx == nR - 1
+    certified = is_smallest_candidate or (
         cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
     )
 
     if certified:
         final_status = "OK"
-        print(
-            f"[MAXSAT-CERT] optimality boundary: "
-            f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
-            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
-            flush=True,
-        )
+        if is_smallest_candidate:
+            print(
+                f"[MAXSAT-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius} "
+                f"is the smallest candidate radius",
+                flush=True,
+            )
+        else:
+            print(
+                f"[MAXSAT-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+                f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+                flush=True,
+            )
     else:
         final_status = "uncertified"
         print(

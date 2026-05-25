@@ -14,6 +14,16 @@ def search_min_radius_incremental(
     seed_idx=None,
 ):
     search_t0 = time.perf_counter()
+    deadline = (
+        search_t0 + float(time_limit)
+        if time_limit and time_limit > 0
+        else None
+    )
+
+    def _remaining_time():
+        if deadline is None:
+            return time_limit
+        return max(0.0, deadline - time.perf_counter())
 
     if solver_name in EXTERNAL_SOLVERS:
         raise ValueError(
@@ -40,6 +50,21 @@ def search_min_radius_incremental(
     tested = {}
     decided = {}
 
+    def _timeout_result():
+        search_elapsed = time.perf_counter() - search_t0
+        nvars = next_var - 1
+        nclauses = len(base_cnf.clauses) + (len(tested) * inst.n)
+        if best_sat_idx is not None:
+            return (
+                "timeout_with_incumbent",
+                radii[best_sat_idx],
+                nvars,
+                nclauses,
+                best_centers,
+                search_elapsed,
+            )
+        return "timeout", None, nvars, nclauses, None, search_elapsed
+
     print(
         f"[INC-INIT] encoding={encoding} solver={solver_name} p={inst.p} "
         f"lo={lo} hi={hi} R_lo={radii[lo]} R_hi={radii[hi]} nR={nR} "
@@ -49,6 +74,11 @@ def search_min_radius_incremental(
 
     with Solver(name=solver_name, bootstrap_with=base_cnf.clauses) as solver:
         while lo <= hi:
+            step_time_limit = _remaining_time()
+            if deadline is not None and step_time_limit <= 0:
+                print("[INC-TIMEOUT] instance-level time budget exhausted", flush=True)
+                return _timeout_result()
+
             mid = (lo + hi) // 2
             R = radii[mid]
 
@@ -72,6 +102,11 @@ def search_min_radius_incremental(
             else:
                 alpha = tested[mid]
 
+            step_time_limit = _remaining_time()
+            if deadline is not None and step_time_limit <= 0:
+                print("[INC-TIMEOUT] instance-level time budget exhausted", flush=True)
+                return _timeout_result()
+
             print(
                 f"[INC-STEP] lo={lo} hi={hi} mid={mid} R={R}",
                 flush=True
@@ -79,8 +114,8 @@ def search_min_radius_incremental(
 
             timer = None
             try:
-                if time_limit and time_limit > 0 and hasattr(solver, "interrupt"):
-                    timer = threading.Timer(time_limit, solver.interrupt)
+                if step_time_limit and step_time_limit > 0 and hasattr(solver, "interrupt"):
+                    timer = threading.Timer(step_time_limit, solver.interrupt)
                     timer.start()
                     try:
                         sat = solver.solve_limited(
@@ -101,8 +136,7 @@ def search_min_radius_incremental(
                     f"[INC-DONE] idx={mid} R={R} status=timeout",
                     flush=True
                 )
-                search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, next_var - 1, None, None, search_elapsed
+                return _timeout_result()
 
             if sat:
                 decided[mid] = "sat"
@@ -138,18 +172,27 @@ def search_min_radius_incremental(
     nclauses = len(base_cnf.clauses) + (len(tested) * inst.n)
 
     cert_unsat_idx = best_sat_idx + 1
-    certified = (
+    is_smallest_candidate = best_sat_idx == nR - 1
+    certified = is_smallest_candidate or (
         cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
     )
 
     if certified:
         final_status = "OK"
-        print(
-            f"[INC-CERT] optimality boundary: "
-            f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
-            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
-            flush=True
-        )
+        if is_smallest_candidate:
+            print(
+                f"[INC-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius} "
+                f"is the smallest candidate radius",
+                flush=True,
+            )
+        else:
+            print(
+                f"[INC-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+                f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+                flush=True
+            )
     else:
         final_status = "uncertified"
         print(

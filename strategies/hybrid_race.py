@@ -113,6 +113,13 @@ def _solve_radius_sat_once(
     cancel_ev=None,
     current_cancel_ref=None,
 ):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     cnf, varmap = inst._encode_cnf(radius, encoding)
 
     if cnf is None:
@@ -120,6 +127,9 @@ def _solve_radius_sat_once(
 
     nvars = cnf.nv
     nclauses = len(cnf.clauses)
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        return idx, radius, "timeout", nvars, nclauses, None
 
     if solver_name in EXTERNAL_SOLVERS:
         base_tmp = "/dev/shm" if os.path.isdir("/dev/shm") else None
@@ -132,7 +142,7 @@ def _solve_radius_sat_once(
             status, model = run_external_solver(
                 solver_name=solver_name,
                 cnf=cnf,
-                time_limit=time_limit,
+                time_limit=step_time_limit,
                 cancel_ev=cancel_ev,
                 tmpdir=local_tmpdir,
             )
@@ -176,10 +186,20 @@ def _solve_radius_sat_once(
 
             threading.Thread(target=_watch_cancel, daemon=True).start()
 
+        timer = None
         try:
-            sat = solver.solve_limited(expect_interrupt=True)
-        except NotImplementedError:
-            sat = solver.solve()
+            if step_time_limit and step_time_limit > 0 and hasattr(solver, "interrupt"):
+                timer = threading.Timer(step_time_limit, solver.interrupt)
+                timer.start()
+                try:
+                    sat = solver.solve_limited(expect_interrupt=True)
+                except NotImplementedError:
+                    sat = solver.solve()
+            else:
+                sat = solver.solve()
+        finally:
+            if timer:
+                timer.cancel()
 
         if sat is None:
             if cancel_ev is not None and cancel_ev.is_set():
@@ -264,6 +284,7 @@ def _sat_worker_loop(inst, encoding, solver_name, job_recv, ctl_recv, result_sen
         step = msg["step"]
         idx = msg["idx"]
         radius = msg["radius"]
+        step_time_limit = msg.get("time_limit", time_limit)
 
         cancel_ev = threading.Event()
 
@@ -274,7 +295,7 @@ def _sat_worker_loop(inst, encoding, solver_name, job_recv, ctl_recv, result_sen
                 encoding=encoding,
                 solver_name=solver_name,
                 radius=radius,
-                time_limit=time_limit,
+                time_limit=step_time_limit,
                 cancel_ev=cancel_ev,
                 current_cancel_ref=current_cancel_ref,
             )
@@ -345,6 +366,7 @@ def _mip_worker_loop(inst, mip_backend, job_recv, ctl_recv, result_send, time_li
             step = msg["step"]
             idx = msg["idx"]
             radius = msg["radius"]
+            step_time_limit = msg.get("time_limit", time_limit)
 
             try:
                 if mip_backend == "cplex_mip":
@@ -352,7 +374,7 @@ def _mip_worker_loop(inst, mip_backend, job_recv, ctl_recv, result_send, time_li
                         inst=inst,
                         idx=idx,
                         radius=radius,
-                        time_limit=time_limit,
+                        time_limit=step_time_limit,
                         data=None,
                         current_cancel_ref=current_cancel_ref,
                     )
@@ -361,7 +383,7 @@ def _mip_worker_loop(inst, mip_backend, job_recv, ctl_recv, result_send, time_li
                         inst=inst,
                         idx=idx,
                         radius=radius,
-                        time_limit=time_limit,
+                        time_limit=step_time_limit,
                         data=None,
                         env=env,
                         current_cancel_ref=current_cancel_ref,
@@ -429,6 +451,16 @@ def search_min_radius_hybrid_race(
     verbose=True,
 ):
     search_t0 = time.perf_counter()
+    deadline = (
+        search_t0 + float(time_limit)
+        if time_limit and time_limit > 0
+        else None
+    )
+
+    def _remaining_time():
+        if deadline is None:
+            return time_limit
+        return max(0.0, deadline - time.perf_counter())
 
     def _log(*args, **kwargs):
         if verbose:
@@ -455,6 +487,19 @@ def search_min_radius_hybrid_race(
     best_nclauses = None
     decided = {}
 
+    def _timeout_result():
+        search_elapsed = time.perf_counter() - search_t0
+        if best_sat_idx is not None:
+            return (
+                "timeout_with_incumbent",
+                radii[best_sat_idx],
+                best_nvars,
+                best_nclauses,
+                best_centers,
+                search_elapsed,
+            )
+        return "timeout", None, None, None, None, search_elapsed
+
     step_counter = itertools.count(1)
 
     sat_proc, sat_job_send, sat_ctl_send, sat_result_recv = _spawn_sat_worker(
@@ -474,6 +519,11 @@ def search_min_radius_hybrid_race(
         )
 
         while lo <= hi:
+            step_time_limit = _remaining_time()
+            if deadline is not None and step_time_limit <= 0:
+                _log("[HYBRID-RACE-TIMEOUT] instance-level time budget exhausted", flush=True)
+                return _timeout_result()
+
             mid = (lo + hi) // 2
             R = radii[mid]
             step = next(step_counter)
@@ -484,8 +534,15 @@ def search_min_radius_hybrid_race(
                 flush=True,
             )
 
-            _send_msg(sat_job_send, {"cmd": "solve", "step": step, "idx": mid, "radius": R})
-            _send_msg(mip_job_send, {"cmd": "solve", "step": step, "idx": mid, "radius": R})
+            job = {
+                "cmd": "solve",
+                "step": step,
+                "idx": mid,
+                "radius": R,
+                "time_limit": step_time_limit,
+            }
+            _send_msg(sat_job_send, job)
+            _send_msg(mip_job_send, job)
 
             winner_backend = None
             winner_result = None
@@ -494,7 +551,20 @@ def search_min_radius_hybrid_race(
             mip_seen = None
 
             while True:
-                ready = wait([sat_result_recv, mip_result_recv], timeout=0.01)
+                wait_timeout = 0.01
+                if deadline is not None:
+                    remaining = _remaining_time()
+                    if remaining <= 0:
+                        _send_msg(sat_ctl_send, {"cmd": "cancel", "step": step})
+                        _send_msg(mip_ctl_send, {"cmd": "cancel", "step": step})
+                        _log(
+                            "[HYBRID-RACE-TIMEOUT] instance-level time budget exhausted",
+                            flush=True,
+                        )
+                        return _timeout_result()
+                    wait_timeout = min(wait_timeout, remaining)
+
+                ready = wait([sat_result_recv, mip_result_recv], timeout=wait_timeout)
                 if not ready:
                     continue
 
@@ -576,8 +646,7 @@ def search_min_radius_hybrid_race(
                     hi = idx2 - 1
 
             else:
-                search_elapsed = time.perf_counter() - search_t0
-                return "timeout", None, None, None, None, search_elapsed
+                return _timeout_result()
 
     finally:
         _send_msg(sat_ctl_send, {"cmd": "stop"})
@@ -608,18 +677,28 @@ def search_min_radius_hybrid_race(
 
     best_radius = radii[best_sat_idx]
     cert_unsat_idx = best_sat_idx + 1
-    certified = (
-        cert_unsat_idx < len(radii) and decided.get(cert_unsat_idx) == "unsat"
+    nR = len(radii)
+    is_smallest_candidate = best_sat_idx == nR - 1
+    certified = is_smallest_candidate or (
+        cert_unsat_idx < nR and decided.get(cert_unsat_idx) == "unsat"
     )
 
     if certified:
         final_status = "OK"
-        _log(
-            f"[HYBRID-RACE-CERT] optimality boundary: "
-            f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
-            f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
-            flush=True,
-        )
+        if is_smallest_candidate:
+            _log(
+                f"[HYBRID-RACE-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius} "
+                f"is the smallest candidate radius",
+                flush=True,
+            )
+        else:
+            _log(
+                f"[HYBRID-RACE-CERT] optimality boundary: "
+                f"best_sat_idx={best_sat_idx}, best_R={best_radius}, "
+                f"next_unsat_idx={cert_unsat_idx}, next_unsat_R={radii[cert_unsat_idx]}",
+                flush=True,
+            )
     else:
         final_status = "uncertified"
         _log(

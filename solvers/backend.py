@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import subprocess
 
 try:
@@ -19,10 +20,6 @@ except Exception:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 EXTERNAL_SOLVERS = {
-    "sparrow2riss": (
-        os.path.join(BASE_DIR, "Sparrow2Riss-2018", "bin", "starexec_run_default"),
-        []
-    ),
     "kissat": (
         os.path.join(BASE_DIR, "kissat", "build", "kissat"),
         []
@@ -45,6 +42,13 @@ def write_dimacs(cnf, path):
 
 
 def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=None):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     bin_path, extra_args = EXTERNAL_SOLVERS[solver_name]
 
     if (not os.path.exists(bin_path)) or (not os.access(bin_path, os.X_OK)):
@@ -63,6 +67,14 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
     )
 
     write_dimacs(cnf, cnf_path)
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        try:
+            if os.path.exists(cnf_path):
+                os.remove(cnf_path)
+        except Exception:
+            pass
+        return "timeout", None
 
     solver_dir = os.path.dirname(bin_path)
 
@@ -94,9 +106,22 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
 
         threading.Thread(target=_watch_cancel, daemon=True).start()
 
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(cnf_path):
+                os.remove(cnf_path)
+        except Exception:
+            pass
+        return "timeout", None
+
     try:
         stdout, stderr = proc.communicate(
-            timeout=time_limit if (time_limit and time_limit > 0) else None
+            timeout=step_time_limit if (step_time_limit and step_time_limit > 0) else None
         )
     except subprocess.TimeoutExpired:
         try:
@@ -156,6 +181,13 @@ def run_external_solver(solver_name, cnf, time_limit, cancel_ev=None, tmpdir=Non
 
 
 def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_ref=None):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     pid = os.getpid()
 
     if cplex is None:
@@ -178,6 +210,9 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
     n = data["n"]
     p = data["p"]
     cover_rows = data["cover_rows"]
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        return idx, radius, "timeout", n, len(cover_rows) + 1, None
 
     model = cplex.Cplex()
     aborter = None
@@ -188,8 +223,8 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
     model.set_log_stream(None)
     model.parameters.threads.set(1)
 
-    if time_limit and time_limit > 0:
-        model.parameters.timelimit.set(float(time_limit))
+    if step_time_limit and step_time_limit > 0:
+        model.parameters.timelimit.set(float(step_time_limit))
 
     try:
         aborter = cplex.Aborter()
@@ -224,6 +259,14 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
         rhs=[float(p)],
         names=["atmost_p"],
     )
+
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        nvars = model.variables.get_num()
+        nclauses = model.linear_constraints.get_num()
+        return idx, radius, "timeout", nvars, nclauses, None
+    if step_time_limit and step_time_limit > 0:
+        model.parameters.timelimit.set(float(step_time_limit))
 
     model.solve()
 
@@ -294,6 +337,13 @@ def solve_radius_cplex(inst, idx, radius, time_limit, data=None, current_cancel_
 
 
 def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, current_cancel_ref=None):
+    call_t0 = time.perf_counter()
+
+    def _remaining_time():
+        if time_limit and time_limit > 0:
+            return max(0.0, float(time_limit) - (time.perf_counter() - call_t0))
+        return time_limit
+
     pid = os.getpid()
 
     if gp is None or GRB is None:
@@ -314,6 +364,9 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
     n = data["n"]
     p = data["p"]
     cover_rows = data["cover_rows"]
+    step_time_limit = _remaining_time()
+    if time_limit and time_limit > 0 and step_time_limit <= 0:
+        return idx, radius, "timeout", n, len(cover_rows) + 1, None
 
     model = None
     try:
@@ -328,8 +381,8 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
         model.Params.OutputFlag = 0
         model.Params.Threads = 1
 
-        if time_limit and time_limit > 0:
-            model.Params.TimeLimit = float(time_limit)
+        if step_time_limit and step_time_limit > 0:
+            model.Params.TimeLimit = float(step_time_limit)
 
         x = model.addVars(n, vtype=GRB.BINARY, name="x")
 
@@ -343,6 +396,13 @@ def solve_radius_gurobi(inst, idx, radius, time_limit, data=None, env=None, curr
             gp.quicksum(x[j] for j in range(n)) <= p,
             name="atmost_p"
         )
+
+        step_time_limit = _remaining_time()
+        if time_limit and time_limit > 0 and step_time_limit <= 0:
+            model.update()
+            return idx, radius, "timeout", model.NumVars, model.NumConstrs, None
+        if step_time_limit and step_time_limit > 0:
+            model.Params.TimeLimit = float(step_time_limit)
 
         model.optimize()
 

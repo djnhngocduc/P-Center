@@ -21,7 +21,7 @@ from strategies.search import (
     search_min_radius_binary, 
 )
 
-DEFAULT_SAT_SOLVERS = ["maplecm", "maplechrono", "sparrow2riss", "glucose4", "kissat"]
+DEFAULT_SAT_SOLVERS = ["maplecm", "maplechrono", "glucose4", "kissat"]
 DEFAULT_INTERNAL_SAT_SOLVERS = ["maplecm", "maplechrono", "glucose4"]
 DEFAULT_MAXSAT_SOLVERS = ["rc2"]
 MIP_SOLVERS = {"cplex_mip", "gurobi_mip"}
@@ -31,7 +31,6 @@ MAXSAT_ENCODING = None
 SUPPORTED_SOLVERS = {
     "maplecm",
     "maplechrono",
-    "sparrow2riss",
     "glucose4",
     "kissat",
     "cplex_mip",
@@ -40,14 +39,14 @@ SUPPORTED_SOLVERS = {
     "openwbo",
 }
 DEFAULT_SAT_ENCODINGS = [
-    "pysat_totalizer",
-    "pysat_mtotalizer",
-    "pysat_kmtotalizer",
-    "pypb_bdd",
     "nsc",
     "sc",
-    "pb_bdd",
 ]
+SOLVED_STATUSES = {"OK"}
+
+
+def is_solved_result(result):
+    return result.get("status") in SOLVED_STATUSES
 
 
 def default_encodings_for(search_mode, solvers):
@@ -89,8 +88,8 @@ def parse_args():
     )
     ap.add_argument(
         "--time-limit",
-        type=int,
-        default=14400,
+        type=float,
+        default=14400.0,
         help="Total time limit per instance run (seconds)",
     )
     ap.add_argument(
@@ -121,7 +120,10 @@ def parse_args():
         elif args.search_mode == "maxsat":
             args.solvers = list(DEFAULT_MAXSAT_SOLVERS)
         elif args.search_mode == "hybrid_race":
-            args.solvers = ["glucose4"]
+            ap.error(
+                "hybrid_race requires --solvers with exactly one SAT solver. "
+                "Choose the MIP side separately with --mip-backend."
+            )
         else:
             args.solvers = list(DEFAULT_SAT_SOLVERS)
 
@@ -170,7 +172,21 @@ def run_experiment(
     *,
     mip_backend="cplex_mip",
 ):
-    solvers = list(solvers)
+    if solvers is None:
+        if search_mode == "incremental":
+            solvers = list(DEFAULT_INTERNAL_SAT_SOLVERS)
+        elif search_mode == "maxsat":
+            solvers = list(DEFAULT_MAXSAT_SOLVERS)
+        elif search_mode == "hybrid_race":
+            raise ValueError(
+                "hybrid_race requires exactly one SAT solver in solvers. "
+                "Choose the MIP side separately with mip_backend."
+            )
+        else:
+            solvers = list(DEFAULT_SAT_SOLVERS)
+    else:
+        solvers = list(solvers)
+
     encodings = default_encodings_for(search_mode, solvers) if encodings is None else list(encodings)
 
     unsupported_solvers = [s for s in solvers if s not in SUPPORTED_SOLVERS]
@@ -252,13 +268,26 @@ def run_experiment(
                 if search_mode == "hybrid_race":
                     extra_kwargs["mip_backend"] = mip_backend
 
-                status, best_radius, nvars, nclauses, centers, search_elapsed = search_fn(
-                    inst,
-                    encoding,
-                    solver_name,
-                    time_limit,
-                    **extra_kwargs,
-                )
+                if time_limit and time_limit > 0:
+                    run_time_limit = max(0.0, float(time_limit) - load_time)
+                else:
+                    run_time_limit = time_limit
+
+                if time_limit and time_limit > 0 and run_time_limit <= 0:
+                    status = "timeout"
+                    best_radius = None
+                    nvars = None
+                    nclauses = None
+                    centers = None
+                    search_elapsed = 0.0
+                else:
+                    status, best_radius, nvars, nclauses, centers, search_elapsed = search_fn(
+                        inst,
+                        encoding,
+                        solver_name,
+                        run_time_limit,
+                        **extra_kwargs,
+                    )
 
                 total_time = load_time + search_elapsed
 
@@ -296,7 +325,7 @@ def run_experiment(
 
 def sort_key(enc_sol_mode):
     enc, sol, mode = enc_sol_mode
-    solver_rank = {"maplecm": 0, "maplechrono": 1, "sparrow2riss": 2, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "gurobi_mip": 9}
+    solver_rank = {"maplecm": 0, "maplechrono": 1, "glucose4": 3, "kissat": 5, "rc2": 6, "openwbo": 7, "cplex_mip": 8, "gurobi_mip": 9}
     mode_rank = {"binary": 0, "incremental": 1, "maxsat": 2, "hybrid_race": 3}
     enc_key = "" if enc is None else enc
     return solver_rank.get(sol, 99), sol, mode_rank.get(mode, 99), mode, enc_key
@@ -316,12 +345,16 @@ def print_instance_summary_for_console(all_results_for_inst):
 
     cfg_bestR = {}
     for key, runs in cfg_runs.items():
-        brs = [x["best_radius"] for x in runs if x.get("best_radius") is not None]
+        brs = [
+            x["best_radius"]
+            for x in runs
+            if is_solved_result(x) and x.get("best_radius") is not None
+        ]
         if brs:
             cfg_bestR[key] = min(brs)
 
     if not cfg_bestR:
-        print(f"instance={inst_name} n={n} p={p} : no feasible radius found")
+        print(f"instance={inst_name} n={n} p={p} : no certified optimum found")
         return
 
     method_cols = sorted(cfg_runs.keys(), key=sort_key)
@@ -333,7 +366,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         loads = [
             x.get("load_time")
             for x in runs
-            if x.get("status") in ("OK", "uncertified")
+            if is_solved_result(x)
             and x.get("best_radius") == gR
             and x.get("load_time") is not None
         ]
@@ -341,7 +374,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         searches = [
             x.get("search_time")
             for x in runs
-            if x.get("status") in ("OK", "uncertified")
+            if is_solved_result(x)
             and x.get("best_radius") == gR
             and x.get("search_time") is not None
         ]
@@ -349,7 +382,7 @@ def print_instance_summary_for_console(all_results_for_inst):
         totals = [
             x.get("total_time")
             for x in runs
-            if x.get("status") in ("OK", "uncertified")
+            if is_solved_result(x)
             and x.get("best_radius") == gR
             and x.get("total_time") is not None
         ]
@@ -360,7 +393,7 @@ def print_instance_summary_for_console(all_results_for_inst):
 
         print(
             f"instance={inst_name} n={n} p={p} encoding={enc} solver={sol} mode={mode}: "
-            f"radius={gR} load_mean={load_str} "
+            f"radius={gR if gR is not None else '-'} load_mean={load_str} "
             f"search_mean={search_str} total_mean={total_str}"
         )
 
@@ -385,6 +418,9 @@ def write_paper_table(all_results, out_csv_path: str):
         all_instances.add((inst, n, p))
         methods_seen.add((enc, sol, mode))
 
+        if not is_solved_result(r):
+            continue
+
         br = r.get("best_radius")
         if br is None:
             continue
@@ -394,7 +430,11 @@ def write_paper_table(all_results, out_csv_path: str):
 
     cfg_bestR = {}
     for key, runs in cfg_runs.items():
-        brs = [x["best_radius"] for x in runs if x.get("best_radius") is not None]
+        brs = [
+            x["best_radius"]
+            for x in runs
+            if is_solved_result(x) and x.get("best_radius") is not None
+        ]
         if brs:
             cfg_bestR[key] = min(brs)
 
@@ -414,7 +454,7 @@ def write_paper_table(all_results, out_csv_path: str):
             continue
 
         for x in runs:
-            if x.get("status") not in ("OK", "uncertified"):
+            if not is_solved_result(x):
                 continue
             if x.get("best_radius") != gR:
                 continue
